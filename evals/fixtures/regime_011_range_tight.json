@@ -1,0 +1,18 @@
+{
+  "id": "regime_011_range_tight",
+  "agent": "regime_classifier",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.0,
+    "vix": 13.1,
+    "VIX_ATR_Divergence": 0.0,
+    "Expiry_Weighted_PCR_Momentum": 0.0,
+    "dte": 10
+  },
+  "expected": {
+    "regime_decision": "RANGE"
+  },
+  "golden_output": {
+    "regime_decision": "RANGE",
+    "rationale": "Fixture expects RANGE based on payload extremes."
+  }
+}

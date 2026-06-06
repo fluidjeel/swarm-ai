@@ -1,0 +1,18 @@
+{
+  "id": "regime_005_uncertain",
+  "agent": "regime_classifier",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.02,
+    "vix": 16.1,
+    "VIX_ATR_Divergence": -0.2,
+    "Expiry_Weighted_PCR_Momentum": 0.18,
+    "dte": 3
+  },
+  "expected": {
+    "regime_decision": "UNCERTAIN"
+  },
+  "golden_output": {
+    "regime_decision": "UNCERTAIN",
+    "rationale": "Fixture expects UNCERTAIN based on payload extremes."
+  }
+}

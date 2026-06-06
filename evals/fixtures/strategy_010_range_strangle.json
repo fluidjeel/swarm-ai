@@ -1,0 +1,25 @@
+{
+  "id": "strategy_010_range_strangle",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.0,
+    "vix": 13.0,
+    "VIX_ATR_Divergence": 0.0,
+    "Expiry_Weighted_PCR_Momentum": -0.01,
+    "dte": 12
+  },
+  "context": {
+    "regime_decision": "RANGE"
+  },
+  "expected": {
+    "strategy": "short_strangle"
+  },
+  "golden_output": {
+    "strategy": "short_strangle",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects short_strangle under RANGE."
+  }
+}

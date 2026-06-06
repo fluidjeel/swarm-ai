@@ -1,0 +1,25 @@
+{
+  "id": "strategy_003_trend_down_bear_put",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 0.6,
+    "vix": 17.0,
+    "VIX_ATR_Divergence": -0.4,
+    "Expiry_Weighted_PCR_Momentum": -0.3,
+    "dte": 6
+  },
+  "context": {
+    "regime_decision": "TREND_DOWN"
+  },
+  "expected": {
+    "strategy": "bear_put_spread"
+  },
+  "golden_output": {
+    "strategy": "bear_put_spread",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects bear_put_spread under TREND_DOWN."
+  }
+}

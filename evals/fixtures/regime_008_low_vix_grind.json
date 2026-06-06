@@ -1,0 +1,18 @@
+{
+  "id": "regime_008_low_vix_grind",
+  "agent": "regime_classifier",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.45,
+    "vix": 11.6,
+    "VIX_ATR_Divergence": -0.3,
+    "Expiry_Weighted_PCR_Momentum": 0.11,
+    "dte": 11
+  },
+  "expected": {
+    "regime_decision": "TREND_UP"
+  },
+  "golden_output": {
+    "regime_decision": "TREND_UP",
+    "rationale": "Fixture expects TREND_UP based on payload extremes."
+  }
+}

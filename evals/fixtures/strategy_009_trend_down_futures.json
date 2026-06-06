@@ -1,0 +1,25 @@
+{
+  "id": "strategy_009_trend_down_futures",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 0.55,
+    "vix": 18.5,
+    "VIX_ATR_Divergence": 0.5,
+    "Expiry_Weighted_PCR_Momentum": -0.35,
+    "dte": 5
+  },
+  "context": {
+    "regime_decision": "TREND_DOWN"
+  },
+  "expected": {
+    "strategy": "nifty_futures_short"
+  },
+  "golden_output": {
+    "strategy": "nifty_futures_short",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects nifty_futures_short under TREND_DOWN."
+  }
+}

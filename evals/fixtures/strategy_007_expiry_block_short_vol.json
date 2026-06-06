@@ -1,0 +1,25 @@
+{
+  "id": "strategy_007_expiry_block_short_vol",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.08,
+    "vix": 15.5,
+    "VIX_ATR_Divergence": 0.1,
+    "Expiry_Weighted_PCR_Momentum": 0.4,
+    "dte": 1
+  },
+  "context": {
+    "regime_decision": "RANGE"
+  },
+  "expected": {
+    "strategy": "cash_no_trade"
+  },
+  "golden_output": {
+    "strategy": "cash_no_trade",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects cash_no_trade under RANGE."
+  }
+}

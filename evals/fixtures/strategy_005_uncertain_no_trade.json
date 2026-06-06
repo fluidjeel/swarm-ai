@@ -1,0 +1,25 @@
+{
+  "id": "strategy_005_uncertain_no_trade",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.01,
+    "vix": 16.0,
+    "VIX_ATR_Divergence": -0.1,
+    "Expiry_Weighted_PCR_Momentum": 0.15,
+    "dte": 3
+  },
+  "context": {
+    "regime_decision": "UNCERTAIN"
+  },
+  "expected": {
+    "strategy": "cash_no_trade"
+  },
+  "golden_output": {
+    "strategy": "cash_no_trade",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects cash_no_trade under UNCERTAIN."
+  }
+}

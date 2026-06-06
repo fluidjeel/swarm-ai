@@ -1,0 +1,25 @@
+{
+  "id": "strategy_001_range_iron_condor",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.03,
+    "vix": 14.0,
+    "VIX_ATR_Divergence": 0.05,
+    "Expiry_Weighted_PCR_Momentum": 0.02,
+    "dte": 8
+  },
+  "context": {
+    "regime_decision": "RANGE"
+  },
+  "expected": {
+    "strategy": "iron_condor"
+  },
+  "golden_output": {
+    "strategy": "iron_condor",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects iron_condor under RANGE."
+  }
+}

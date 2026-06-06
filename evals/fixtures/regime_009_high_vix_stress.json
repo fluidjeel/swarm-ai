@@ -1,0 +1,18 @@
+{
+  "id": "regime_009_high_vix_stress",
+  "agent": "regime_classifier",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 0.9,
+    "vix": 22.3,
+    "VIX_ATR_Divergence": 1.1,
+    "Expiry_Weighted_PCR_Momentum": -0.25,
+    "dte": 5
+  },
+  "expected": {
+    "regime_decision": "CHOPPY"
+  },
+  "golden_output": {
+    "regime_decision": "CHOPPY",
+    "rationale": "Fixture expects CHOPPY based on payload extremes."
+  }
+}

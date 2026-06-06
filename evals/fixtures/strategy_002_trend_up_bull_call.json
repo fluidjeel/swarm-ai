@@ -1,0 +1,25 @@
+{
+  "id": "strategy_002_trend_up_bull_call",
+  "agent": "strategy_selector",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 1.7,
+    "vix": 13.5,
+    "VIX_ATR_Divergence": 0.3,
+    "Expiry_Weighted_PCR_Momentum": 0.2,
+    "dte": 7
+  },
+  "context": {
+    "regime_decision": "TREND_UP"
+  },
+  "expected": {
+    "strategy": "bull_call_spread"
+  },
+  "golden_output": {
+    "strategy": "bull_call_spread",
+    "supporting_signals": [
+      "payload_regime_alignment",
+      "risk_filter_pass"
+    ],
+    "rationale": "Fixture expects bull_call_spread under TREND_UP."
+  }
+}

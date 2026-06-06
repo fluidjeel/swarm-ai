@@ -1,0 +1,18 @@
+{
+  "id": "regime_002_trend_down",
+  "agent": "regime_classifier",
+  "feature_payload": {
+    "NIFTY_500_AD_Ratio": 0.62,
+    "vix": 17.5,
+    "VIX_ATR_Divergence": -0.5,
+    "Expiry_Weighted_PCR_Momentum": -0.31,
+    "dte": 6
+  },
+  "expected": {
+    "regime_decision": "TREND_DOWN"
+  },
+  "golden_output": {
+    "regime_decision": "TREND_DOWN",
+    "rationale": "Fixture expects TREND_DOWN based on payload extremes."
+  }
+}
