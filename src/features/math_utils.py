@@ -50,9 +50,9 @@ def compute_expiry_weighted_pcr_momentum(
     current_pcr: float,
     prior_pcr: float | None,
     dte: int,
-) -> float:
+) -> float | None:
     if prior_pcr is None or prior_pcr <= 0:
-        return 0.0
+        return None
 
     raw_momentum = (current_pcr - prior_pcr) / prior_pcr
     dte_weight = min(max(dte, 0) / 10.0, 1.0)

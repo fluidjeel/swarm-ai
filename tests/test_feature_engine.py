@@ -59,6 +59,7 @@ class FeatureEngineTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(payload["vix"], 14.5)
         self.assertEqual(payload["NIFTY_500_AD_Ratio"], 1.2)
+        self.assertIsNone(payload["Expiry_Weighted_PCR_Momentum"])
 
     def test_to_opening_regime(self) -> None:
         payload = {

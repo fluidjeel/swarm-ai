@@ -31,7 +31,7 @@ class FeaturePayload(TypedDict):
     NIFTY_500_AD_Ratio: float
     vix: float
     VIX_ATR_Divergence: float
-    Expiry_Weighted_PCR_Momentum: float
+    Expiry_Weighted_PCR_Momentum: float | None
     dte: int
 
 
@@ -122,7 +122,9 @@ async def compute_feature_payload(
             ),
             4,
         ),
-        "Expiry_Weighted_PCR_Momentum": round(pcr_momentum, 4),
+        "Expiry_Weighted_PCR_Momentum": (
+            round(pcr_momentum, 4) if pcr_momentum is not None else None
+        ),
         "dte": int(dte),
     }
 
@@ -135,7 +137,11 @@ async def compute_feature_payload(
         NIFTY_500_AD_Ratio=float(sanitized["NIFTY_500_AD_Ratio"]),
         vix=float(sanitized["vix"]),
         VIX_ATR_Divergence=float(sanitized["VIX_ATR_Divergence"]),
-        Expiry_Weighted_PCR_Momentum=float(sanitized["Expiry_Weighted_PCR_Momentum"]),
+        Expiry_Weighted_PCR_Momentum=(
+            float(sanitized["Expiry_Weighted_PCR_Momentum"])
+            if sanitized.get("Expiry_Weighted_PCR_Momentum") is not None
+            else None
+        ),
         dte=int(sanitized["dte"]),
     )
 

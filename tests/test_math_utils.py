@@ -28,6 +28,14 @@ class MathUtilsTests(unittest.TestCase):
         value = compute_expiry_weighted_pcr_momentum(current_pcr=1.1, prior_pcr=1.0, dte=5)
         self.assertAlmostEqual(value, 0.05)
 
+    def test_pcr_momentum_none_without_history(self) -> None:
+        value = compute_expiry_weighted_pcr_momentum(current_pcr=1.1, prior_pcr=None, dte=5)
+        self.assertIsNone(value)
+
+    def test_pcr_momentum_zero_when_unchanged(self) -> None:
+        value = compute_expiry_weighted_pcr_momentum(current_pcr=1.0, prior_pcr=1.0, dte=5)
+        self.assertEqual(value, 0.0)
+
     def test_vix_atr_divergence(self) -> None:
         bars = [
             {"timestamp": 1, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1},
