@@ -5,7 +5,7 @@
       "Sid": "DynamoDBPutTraceOnly",
       "Effect": "Allow",
       "Action": ["dynamodb:PutItem"],
-      "Resource": "arn:aws:dynamodb:ap-south-1:YOUR_AWS_ACCOUNT_ID:table/A2A_Traces"
+      "Resource": "arn:aws:dynamodb:ap-south-1:331610483111:table/A2A_Traces"
     },
     {
       "Sid": "S3ReadPromptsOnly",
@@ -17,13 +17,13 @@
       "Sid": "SSMReadLLMKeys",
       "Effect": "Allow",
       "Action": ["ssm:GetParameter", "ssm:GetParameters"],
-      "Resource": "arn:aws:ssm:ap-south-1:YOUR_AWS_ACCOUNT_ID:parameter/a2a/llm/*"
+      "Resource": "arn:aws:ssm:ap-south-1:331610483111:parameter/a2a/llm/*"
     },
     {
       "Sid": "KMSDecryptSSMDefaults",
       "Effect": "Allow",
       "Action": ["kms:Decrypt"],
-      "Resource": "arn:aws:kms:ap-south-1:YOUR_AWS_ACCOUNT_ID:key/*",
+      "Resource": "arn:aws:kms:ap-south-1:331610483111:key/*",
       "Condition": {
         "StringEquals": {
           "kms:ViaService": "ssm.ap-south-1.amazonaws.com"
