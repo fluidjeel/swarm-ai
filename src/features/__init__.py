@@ -2,6 +2,7 @@
 
 from src.features.feature_engine import (
     FeatureEngineError,
+    FeatureEngineErrorCode,
     FeaturePayload,
     compute_feature_payload,
     poll_feature_payload,
@@ -15,6 +16,7 @@ from src.features.regime_metrics import (
 
 __all__ = [
     "FeatureEngineError",
+    "FeatureEngineErrorCode",
     "FeaturePayload",
     "RegimeMetricsError",
     "compute_feature_payload",

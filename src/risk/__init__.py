@@ -9,6 +9,7 @@ from src.risk.exit_engine import (
 )
 from src.risk.gatekeeper import (
     GatekeeperDecision,
+    GatekeeperRule,
     GatekeeperVerdict,
     RiskGatekeeper,
     compute_allowed_lots,
@@ -22,6 +23,7 @@ __all__ = [
     "ExitEngine",
     "FuturesPosition",
     "GatekeeperDecision",
+    "GatekeeperRule",
     "GatekeeperVerdict",
     "RiskGatekeeper",
     "compute_allowed_lots",

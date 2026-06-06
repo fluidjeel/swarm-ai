@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, TypedDict
 
@@ -28,6 +29,7 @@ DEFAULT_REQUEST_TIMEOUT_SEC: Final = 30.0
 
 
 class FeaturePayload(TypedDict):
+    # HLDD field name; v1 computes this from Nifty 50 A/D (not full Nifty 500).
     NIFTY_500_AD_Ratio: float
     vix: float
     VIX_ATR_Divergence: float
@@ -35,8 +37,19 @@ class FeaturePayload(TypedDict):
     dte: int
 
 
+class FeatureEngineErrorCode(StrEnum):
+    TIMEOUT = "TIMEOUT"
+    MARKET_DATA = "MARKET_DATA"
+    SANITIZER = "SANITIZER"
+    UNKNOWN = "UNKNOWN"
+
+
 class FeatureEngineError(RuntimeError):
     """Raised when the feature engine cannot produce a safe payload."""
+
+    def __init__(self, message: str, *, code: FeatureEngineErrorCode = FeatureEngineErrorCode.UNKNOWN) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _utc_now_iso() -> str:
@@ -76,7 +89,8 @@ async def compute_feature_payload(
         )
     except TimeoutError as exc:
         raise FeatureEngineError(
-            f"Feature engine timed out after {request_timeout_sec:.1f}s"
+            f"Feature engine timed out after {request_timeout_sec:.1f}s",
+            code=FeatureEngineErrorCode.TIMEOUT,
         ) from exc
 
     labels = ("vix", "pcr", "breadth", "nifty_ohlcv", "vix_history")
@@ -87,10 +101,19 @@ async def compute_feature_payload(
 
     if errors:
         if any(isinstance(r, (MarketDataTimeoutError, TimeoutError)) for r in results):
-            raise FeatureEngineError("Feature engine failed due to API timeout: " + "; ".join(errors))
+            raise FeatureEngineError(
+                "Feature engine failed due to API timeout: " + "; ".join(errors),
+                code=FeatureEngineErrorCode.TIMEOUT,
+            )
         if any(isinstance(r, MarketDataError) for r in results):
-            raise FeatureEngineError("Feature engine failed due to market data error: " + "; ".join(errors))
-        raise FeatureEngineError("Feature engine failed: " + "; ".join(errors))
+            raise FeatureEngineError(
+                "Feature engine failed due to market data error: " + "; ".join(errors),
+                code=FeatureEngineErrorCode.MARKET_DATA,
+            )
+        raise FeatureEngineError(
+            "Feature engine failed: " + "; ".join(errors),
+            code=FeatureEngineErrorCode.UNKNOWN,
+        )
 
     current_vix = float(results[0])  # type: ignore[arg-type]
     pcr_snapshot = results[1]  # type: ignore[assignment]
@@ -131,7 +154,10 @@ async def compute_feature_payload(
     try:
         sanitized = sanitize_feature_payload(payload)
     except SanitizerError as exc:
-        raise FeatureEngineError(f"Sanitizer rejected feature payload: {exc}") from exc
+        raise FeatureEngineError(
+            f"Sanitizer rejected feature payload: {exc}",
+            code=FeatureEngineErrorCode.SANITIZER,
+        ) from exc
 
     return FeaturePayload(
         NIFTY_500_AD_Ratio=float(sanitized["NIFTY_500_AD_Ratio"]),

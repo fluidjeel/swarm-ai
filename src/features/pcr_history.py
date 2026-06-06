@@ -54,6 +54,7 @@ def save_pcr_snapshot(
     path: Path = DEFAULT_HISTORY_PATH,
     max_entries: int = 200,
 ) -> PcrSnapshot:
+    """Persist PCR; trim to max_entries (200 ≈ 16.6h at 5-min ticks, sufficient for 2h lookback)."""
     snapshot = PcrSnapshot(pcr=pcr, captured_at_iso=_utc_now_iso())
     history = load_pcr_history(path)
     history.append(snapshot)

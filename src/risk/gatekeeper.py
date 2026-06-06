@@ -32,11 +32,18 @@ class GatekeeperVerdict(StrEnum):
     REJECT = "REJECT"
 
 
+class GatekeeperRule(StrEnum):
+    DAILY_CIRCUIT_BREAKER = "daily_circuit_breaker"
+    LOT_SCALING = "lot_scaling"
+    VIX_CEILING = "vix_ceiling"
+    GAMMA_DTE_FILTER = "gamma_dte_filter"
+
+
 @dataclass(frozen=True, slots=True)
 class GatekeeperDecision:
     verdict: GatekeeperVerdict
     reason: str
-    rule_id: str | None = None
+    rule_id: GatekeeperRule | None = None
     allowed_lots: int = 1
     expected_round_trip_cost: float = 0.0
 
@@ -103,7 +110,7 @@ class RiskGatekeeper:
                     f"Daily circuit breaker hit: realized PnL {daily_realized_pnl:.2f} "
                     f"<= {self.max_daily_loss:.2f}"
                 ),
-                rule_id="daily_circuit_breaker",
+                rule_id=GatekeeperRule.DAILY_CIRCUIT_BREAKER,
                 allowed_lots=allowed_lots,
                 expected_round_trip_cost=expected_cost,
             )
@@ -115,7 +122,7 @@ class RiskGatekeeper:
                     f"Lot scaling cap exceeded: requested {requested_lots} > "
                     f"allowed {allowed_lots} at capital {current_capital:.2f}"
                 ),
-                rule_id="lot_scaling",
+                rule_id=GatekeeperRule.LOT_SCALING,
                 allowed_lots=allowed_lots,
                 expected_round_trip_cost=expected_cost,
             )
@@ -124,7 +131,7 @@ class RiskGatekeeper:
             return GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
                 reason=f"VIX ceiling breached for short-vol RANGE strategy: {vix:.2f} > {self.vix_ceiling:.2f}",
-                rule_id="vix_ceiling",
+                rule_id=GatekeeperRule.VIX_CEILING,
                 allowed_lots=allowed_lots,
                 expected_round_trip_cost=expected_cost,
             )
@@ -133,7 +140,7 @@ class RiskGatekeeper:
             return GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
                 reason=f"Gamma/DTE filter: DTE {dte} <= {self.expiry_dte_block} for RANGE strategy",
-                rule_id="gamma_dte_filter",
+                rule_id=GatekeeperRule.GAMMA_DTE_FILTER,
                 allowed_lots=allowed_lots,
                 expected_round_trip_cost=expected_cost,
             )

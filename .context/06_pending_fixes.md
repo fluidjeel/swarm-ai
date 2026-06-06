@@ -1,7 +1,7 @@
 # Pending Fixes Checklist
 
 Tracked from MiniMax review (Gatekeeper + Feature Engine) and Phase 2/3 close-out.  
-**Done in this pass:** lot scaling, slippage surface, gatekeeper boundary tests, PCR momentum `None` vs `0.0`.
+**Done:** lot scaling, slippage, boundary tests, PCR momentum `None` vs `0.0`, `FeatureEngineError.code`, `GatekeeperRule` StrEnum, Nifty 50 proxy docs.
 
 ---
 
@@ -12,7 +12,7 @@ Tracked from MiniMax review (Gatekeeper + Feature Engine) and Phase 2/3 close-ou
 | ✅ | Dynamic lot scaling (HLDD §2.2) | `compute_allowed_lots()`, reject if `requested_lots > allowed` |
 | ✅ | Slippage surface (₹150 futures / ₹40 options) | `expected_round_trip_cost` on every `GatekeeperDecision` |
 | ✅ | Boundary tests (VIX, DTE, PnL, lots, slippage) | `tests/test_gatekeeper.py` |
-| ⬜ | `GatekeeperRule` StrEnum for `rule_id` | Typos become import-time errors |
+| ✅ | `GatekeeperRule` StrEnum for `rule_id` | Typos become import-time errors |
 | ⬜ | Document `dte <= 1` semantics (weekly vs monthly) | Configurable via `expiry_dte_block` already |
 | ⬜ | Case-normalize payload keys at boundary | `_read_float` only tries known aliases |
 | ⬜ | Ordered rule list (explicit priority) | Low priority until 5+ rules |
@@ -25,8 +25,8 @@ Tracked from MiniMax review (Gatekeeper + Feature Engine) and Phase 2/3 close-ou
 | Status | Item | Notes |
 |--------|------|-------|
 | ✅ | PCR momentum: `None` = no history, `0.0` = flat | `compute_expiry_weighted_pcr_momentum` returns `float \| None` |
-| ⬜ | `FeatureEngineError.code` enum (`TIMEOUT`, `MARKET_DATA`, …) | Standardize caller handling |
-| ⬜ | Rename Nifty 50 proxy field / method | `NIFTY_500_AD_Ratio` → document or `NIFTY_BREADTH_PROXY` |
+| ✅ | `FeatureEngineError.code` enum (`TIMEOUT`, `MARKET_DATA`, …) | Standardize caller handling |
+| ✅ | Document Nifty 50 proxy (field kept for HLDD/eval compat) | Comment on `FeaturePayload.NIFTY_500_AD_Ratio` |
 | ⬜ | Trading-day DTE (NSE holiday calendar) | Calendar DTE overstates near holidays |
 | ⬜ | VIX/ATR divergence threshold bands | Formula exists; calibration for Agent 1 TBD |
 | ⬜ | Log warnings on degenerate inputs (`atr=0`, `previous_vix=0`) | Silent `0.0` today |

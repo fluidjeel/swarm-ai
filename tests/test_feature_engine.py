@@ -7,8 +7,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.data.base_provider import BreadthSnapshot, OptionChainPcr
-from src.features.feature_engine import compute_feature_payload, to_opening_regime
+from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChainPcr
+from src.features.feature_engine import (
+    FeatureEngineError,
+    FeatureEngineErrorCode,
+    compute_feature_payload,
+    to_opening_regime,
+)
 
 
 class _FakeProvider:
@@ -42,6 +47,11 @@ class _FakeProvider:
         ]
 
 
+class _FailingVixProvider(_FakeProvider):
+    async def get_vix(self) -> float:
+        raise MarketDataError("simulated provider failure")
+
+
 class FeatureEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_compute_feature_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,6 +70,11 @@ class FeatureEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["vix"], 14.5)
         self.assertEqual(payload["NIFTY_500_AD_Ratio"], 1.2)
         self.assertIsNone(payload["Expiry_Weighted_PCR_Momentum"])
+
+    async def test_market_data_error_has_code(self) -> None:
+        with self.assertRaises(FeatureEngineError) as ctx:
+            await compute_feature_payload(_FailingVixProvider())
+        self.assertEqual(ctx.exception.code, FeatureEngineErrorCode.MARKET_DATA)
 
     def test_to_opening_regime(self) -> None:
         payload = {

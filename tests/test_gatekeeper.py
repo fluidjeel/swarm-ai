@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from src.risk.gatekeeper import (
+    GatekeeperRule,
     GatekeeperVerdict,
     RiskGatekeeper,
     compute_allowed_lots,
@@ -39,7 +40,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=0.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "gamma_dte_filter")
+        self.assertEqual(decision.rule_id, GatekeeperRule.GAMMA_DTE_FILTER)
 
     def test_rejects_high_vix_short_vol(self) -> None:
         payload = dict(self.base_payload, vix=19.0)
@@ -49,7 +50,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=0.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "vix_ceiling")
+        self.assertEqual(decision.rule_id, GatekeeperRule.VIX_CEILING)
 
     def test_rejects_daily_circuit_breaker(self) -> None:
         decision = self.gatekeeper.evaluate(
@@ -58,7 +59,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=-8000.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "daily_circuit_breaker")
+        self.assertEqual(decision.rule_id, GatekeeperRule.DAILY_CIRCUIT_BREAKER)
 
     def test_allows_directional_on_expiry_day(self) -> None:
         payload = dict(self.base_payload, dte=1)
@@ -86,7 +87,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=0.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "gamma_dte_filter")
+        self.assertEqual(decision.rule_id, GatekeeperRule.GAMMA_DTE_FILTER)
 
     def test_vix_at_exact_ceiling_passes(self) -> None:
         payload = dict(self.base_payload, vix=18.0)
@@ -105,7 +106,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=0.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "vix_ceiling")
+        self.assertEqual(decision.rule_id, GatekeeperRule.VIX_CEILING)
 
     def test_daily_pnl_above_breaker_passes(self) -> None:
         decision = self.gatekeeper.evaluate(
@@ -122,7 +123,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             daily_realized_pnl=-8001.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "daily_circuit_breaker")
+        self.assertEqual(decision.rule_id, GatekeeperRule.DAILY_CIRCUIT_BREAKER)
 
     def test_bull_call_spread_at_high_vix_approves(self) -> None:
         payload = dict(self.base_payload, vix=22.0)
@@ -150,7 +151,7 @@ class RiskGatekeeperTests(unittest.TestCase):
             requested_lots=2,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
-        self.assertEqual(decision.rule_id, "lot_scaling")
+        self.assertEqual(decision.rule_id, GatekeeperRule.LOT_SCALING)
         self.assertEqual(decision.allowed_lots, 1)
 
     def test_approves_requested_lots_within_cap(self) -> None:

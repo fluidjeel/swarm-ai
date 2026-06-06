@@ -1,0 +1,8 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://opencode.ai/zen",
+    "ANTHROPIC_MODEL": "minimax-m2.5-free",
+    "ANTHROPIC_API_KEY": "sk-pedmFg6tvyTn3wBtYPalfz7Ltv9iPuR69qFiHP4Vjk0xYZGfH3xewPA7lkyXGgtL",
+    "ENABLE_TOOL_SEARCH": "true"
+  }
+}
