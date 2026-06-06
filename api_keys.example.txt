@@ -1,0 +1,10 @@
+# A2A LLM API Keys (LOCAL ONLY - never commit real values)
+# Copy to C:\Manasjit\api_keys.txt and fill in your keys.
+#
+# OPENAI_API_KEY=sk-proj-...
+# GROK_API_KEY=xai-...
+# DEEPSEEK_API_KEY=sk-...
+
+OPENAI_API_KEY=
+GROK_API_KEY=
+DEEPSEEK_API_KEY=

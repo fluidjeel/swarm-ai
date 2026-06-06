@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-SUPPORTED_PROVIDERS = ("openai", "gemini", "grok", "deepseek")
+SUPPORTED_PROVIDERS = ("openai", "grok", "deepseek")
 
 
 class LLMClientError(RuntimeError):
@@ -38,8 +38,6 @@ def call_llm(
 
     if provider == "openai":
         return _call_openai(model=model, system_prompt=system_prompt, user_message=user_message)
-    if provider == "gemini":
-        return _call_gemini(model=model, system_prompt=system_prompt, user_message=user_message)
     if provider == "grok":
         return _call_openai_compatible(
             api_key_env="GROK_API_KEY",
@@ -109,32 +107,4 @@ def _call_openai_compatible(
 
     if not content.strip():
         raise LLMClientError(f"{provider_label} returned empty content")
-    return content
-
-
-def _call_gemini(*, model: str, system_prompt: str, user_message: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
-        raise LLMClientError("GEMINI_API_KEY is not set")
-
-    try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=user_message,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-        )
-        content = (response.text or "").strip()
-    except Exception as exc:
-        raise LLMClientError(f"Gemini request failed: {exc}") from exc
-
-    if not content:
-        raise LLMClientError("Gemini returned empty content")
     return content

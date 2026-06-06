@@ -1,78 +1,32 @@
 #!/usr/bin/env python3
 """
-Create gitignored .env from a local api_keys.txt file.
+Create gitignored .env from a structured local api_keys.txt file.
 
-Default source (override with --source):
+Default source:
   C:\\Manasjit\\api_keys.txt
-
-Keys are detected by format and written to .env in project root.
-This script never prints full secret values.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.config.key_file import REQUIRED_KEYS, parse_key_file
+
 DEFAULT_SOURCE = Path(r"C:\Manasjit\api_keys.txt")
 TARGET = ROOT / ".env"
-
-PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("OPENAI_API_KEY", re.compile(r"^sk-proj-", re.IGNORECASE)),
-    ("GROK_API_KEY", re.compile(r"^xai-", re.IGNORECASE)),
-    ("DEEPSEEK_API_KEY", re.compile(r"^sk-[0-9a-f]", re.IGNORECASE)),
-    ("GEMINI_API_KEY", re.compile(r"^AQ\.", re.IGNORECASE)),
-]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate local .env from api_keys.txt")
-    parser.add_argument(
-        "--source",
-        type=Path,
-        default=DEFAULT_SOURCE,
-        help="Path to plaintext api key file",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing .env",
-    )
+    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--force", action="store_true", help="Overwrite existing .env")
     return parser.parse_args()
-
-
-def classify_key(raw: str) -> str | None:
-    token = raw.strip()
-    if not token:
-        return None
-    for env_name, pattern in PATTERNS:
-        if pattern.match(token):
-            return env_name
-    return None
-
-
-def parse_keys_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Key file not found: {path}")
-
-    discovered: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        env_name = classify_key(line)
-        if not env_name:
-            continue
-        if env_name in discovered:
-            raise ValueError(f"Duplicate key type detected for {env_name}")
-        discovered[env_name] = line.strip()
-
-    required = {name for name, _ in PATTERNS}
-    missing = sorted(required - set(discovered.keys()))
-    if missing:
-        raise ValueError(f"Missing keys in source file: {', '.join(missing)}")
-
-    return discovered
 
 
 def write_env(values: dict[str, str]) -> None:
@@ -81,16 +35,9 @@ def write_env(values: dict[str, str]) -> None:
         "# DO NOT COMMIT",
         "",
     ]
-    for key in ["OPENAI_API_KEY", "GEMINI_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY"]:
+    for key in REQUIRED_KEYS:
         lines.append(f"{key}={values[key]}")
-    lines.extend(
-        [
-            "",
-            "EVAL_LLM_PROVIDER=openai",
-            "EVAL_LLM_MODEL=",
-            "",
-        ]
-    )
+    lines.extend(["", "EVAL_LLM_PROVIDER=openai", "EVAL_LLM_MODEL=", ""])
     TARGET.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -101,7 +48,7 @@ def main() -> int:
         return 0
 
     try:
-        values = parse_keys_file(args.source)
+        values = parse_key_file(args.source)
         write_env(values)
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

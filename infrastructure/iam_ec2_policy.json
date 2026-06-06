@@ -12,6 +12,12 @@
       "Effect": "Allow",
       "Action": ["s3:GetObject"],
       "Resource": "arn:aws:s3:::a2a-prompts/*"
+    },
+    {
+      "Sid": "SecretsManagerReadLLMKeys",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:ap-south-1:YOUR_AWS_ACCOUNT_ID:secret:a2a/llm-api-keys*"
     }
   ]
 }

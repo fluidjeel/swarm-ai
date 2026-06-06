@@ -44,7 +44,6 @@ def _fixture() -> dict:
 def _default_model(provider: str) -> str:
     return {
         "openai": "gpt-4o-mini",
-        "gemini": "gemini-2.0-flash",
         "grok": "grok-4.3",
         "deepseek": "deepseek-chat",
     }[provider]
@@ -58,16 +57,19 @@ def _system_prompt() -> str:
 
 
 def main() -> int:
-    env_path = load_project_env()
-    if not env_path:
-        print("ERROR: .env not found. Run: python scripts/setup_local_env.py", file=sys.stderr)
+    source = load_project_env()
+    if source == "none":
+        print(
+            "ERROR: No secrets loaded. Run setup_local_env.py or configure AWS Secrets Manager.",
+            file=sys.stderr,
+        )
         return 1
 
     args = parse_args()
     providers = [args.provider] if args.provider else supported_providers()
 
     print("LLM Provider Smoke Test")
-    print(f"  Env file: {env_path}")
+    print(f"  Secrets source: {source}")
     print()
 
     failures = 0
@@ -76,7 +78,6 @@ def main() -> int:
 
         env_map = {
             "openai": "OPENAI_API_KEY",
-            "gemini": "GEMINI_API_KEY",
             "grok": "GROK_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
         }

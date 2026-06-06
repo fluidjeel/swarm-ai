@@ -3,6 +3,7 @@ data/fyers_token.json
 .env.local
 .env.*.local
 api_keys.txt
+api_keys.txt.bak
 !.env.example
 secrets/
 *.pem
