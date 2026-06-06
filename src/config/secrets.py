@@ -16,7 +16,7 @@ from typing import Literal
 
 ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = ROOT / ".env"
-LLM_KEYS = ("OPENAI_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY")
+LLM_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY")
 DEFAULT_SECRET_NAME = "a2a/llm-api-keys"
 
 

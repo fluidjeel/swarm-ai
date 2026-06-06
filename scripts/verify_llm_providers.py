@@ -44,6 +44,7 @@ def _fixture() -> dict:
 def _default_model(provider: str) -> str:
     return {
         "openai": "gpt-4o-mini",
+        "anthropic": "claude-haiku-4-5-20251001",
         "grok": "grok-4.3",
         "deepseek": "deepseek-chat",
     }[provider]
@@ -78,6 +79,7 @@ def main() -> int:
 
         env_map = {
             "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
             "grok": "GROK_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
         }

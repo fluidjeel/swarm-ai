@@ -51,7 +51,7 @@ def main() -> int:
     print(f"Wrote formatted key file: {target}")
     if args.in_place:
         print(f"Backup saved: {backup}")
-    print("Configured keys: OPENAI_API_KEY, GROK_API_KEY, DEEPSEEK_API_KEY")
+    print("Configured keys: OPENAI_API_KEY, ANTHROPIC_API_KEY, GROK_API_KEY, DEEPSEEK_API_KEY")
     return 0
 
 

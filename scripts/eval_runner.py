@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
 def _default_model(provider: str) -> str:
     defaults = {
         "openai": "gpt-4o-mini",
+        "anthropic": "claude-haiku-4-5-20251001",
         "grok": "grok-4.3",
         "deepseek": "deepseek-chat",
     }

@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-SUPPORTED_PROVIDERS = ("openai", "grok", "deepseek")
+SUPPORTED_PROVIDERS = ("openai", "anthropic", "grok", "deepseek")
 
 
 class LLMClientError(RuntimeError):
@@ -38,6 +38,8 @@ def call_llm(
 
     if provider == "openai":
         return _call_openai(model=model, system_prompt=system_prompt, user_message=user_message)
+    if provider == "anthropic":
+        return _call_anthropic(model=model, system_prompt=system_prompt, user_message=user_message)
     if provider == "grok":
         return _call_openai_compatible(
             api_key_env="GROK_API_KEY",
@@ -107,4 +109,30 @@ def _call_openai_compatible(
 
     if not content.strip():
         raise LLMClientError(f"{provider_label} returned empty content")
+    return content
+
+
+def _call_anthropic(*, model: str, system_prompt: str, user_message: str) -> str:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise LLMClientError("ANTHROPIC_API_KEY is not set")
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model,
+            max_tokens=512,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        chunks = [block.text for block in response.content if block.type == "text"]
+        content = "".join(chunks).strip()
+    except Exception as exc:
+        raise LLMClientError(f"Anthropic request failed: {exc}") from exc
+
+    if not content:
+        raise LLMClientError("Anthropic returned empty content")
     return content

@@ -5,19 +5,43 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REQUIRED_KEYS = ("OPENAI_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY")
+REQUIRED_KEYS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GROK_API_KEY",
+    "DEEPSEEK_API_KEY",
+)
+
+KEY_ALIASES: dict[str, str] = {
+    "ANTHROPIC": "ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
+    "Anthropi": "ANTHROPIC_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+}
 
 LEGACY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("OPENAI_API_KEY", re.compile(r"^sk-proj-", re.IGNORECASE)),
+    ("ANTHROPIC_API_KEY", re.compile(r"^sk-ant-", re.IGNORECASE)),
     ("GROK_API_KEY", re.compile(r"^xai-", re.IGNORECASE)),
-    ("DEEPSEEK_API_KEY", re.compile(r"^sk-[0-9a-f]", re.IGNORECASE)),
+    ("DEEPSEEK_API_KEY", re.compile(r"^sk-(?!proj-|ant-)[0-9a-f]{8,}", re.IGNORECASE)),
 ]
+
+
+def _normalize_key_name(raw_key: str) -> str:
+    key = raw_key.strip()
+    if key in KEY_ALIASES:
+        return KEY_ALIASES[key]
+    upper = key.upper()
+    if upper in REQUIRED_KEYS:
+        return upper
+    return key
 
 
 def parse_key_file(path: Path) -> dict[str, str]:
     """
     Parse KEY=VALUE lines or legacy one-key-per-line format.
-    Ignores blank lines, comments, and GEMINI_API_KEY if present.
+    Ignores blank lines, comments, and deprecated GEMINI_API_KEY if present.
     """
     if not path.exists():
         raise FileNotFoundError(f"Key file not found: {path}")
@@ -30,12 +54,12 @@ def parse_key_file(path: Path) -> dict[str, str]:
 
         if "=" in line and not line.startswith("="):
             key, value = line.split("=", 1)
-            key = key.strip()
+            env_name = _normalize_key_name(key)
             value = value.strip().strip('"').strip("'")
-            if key == "GEMINI_API_KEY":
+            if env_name == "GEMINI_API_KEY":
                 continue
-            if key in REQUIRED_KEYS and value:
-                discovered[key] = value
+            if env_name in REQUIRED_KEYS and value:
+                discovered[env_name] = value
             continue
 
         for env_name, pattern in LEGACY_PATTERNS:
