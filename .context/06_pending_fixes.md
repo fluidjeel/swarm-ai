@@ -69,6 +69,9 @@ Tracked from MiniMax review (Gatekeeper + Feature Engine) and Phase 2/3 close-ou
 | ⬜ | Monday market hours: live `run_regime_metrics.py` smoke | Validate non-zero breadth |
 | ⬜ | `git pull` on EC2 after push | Deploy latest |
 | ⬜ | `iam_lambda_policy.json` account ID placeholder | `YOUR_AWS_ACCOUNT_ID` |
+| ✅ | Rotate leaked Anthropic/opencode API key | User rotated key (2026-06-06) |
+| ✅ | Untrack `~/.claude`, extend `.gitignore` | Commit `d32e7f5` |
+| ⬜ | **Purge `~/.claude` from git history** | Requires `git filter-repo` + **force push** to `main` |
 | ⬜ | Rotate exposed AWS access key | From prior `aws configure` session |
 | ⬜ | EC2 cron/systemd for market-hours polling only | Phase 2 close-out |
 
