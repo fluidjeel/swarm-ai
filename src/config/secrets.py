@@ -4,20 +4,21 @@ Secure environment loading for local development and EC2 runtime.
 Load order:
   1) Existing process env vars (never overwritten)
   2) Project .env (gitignored, local dev)
-  3) AWS Secrets Manager (EC2/production) when enabled or keys still missing
+  3) AWS SSM Parameter Store SecureString (EC2/production)
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Literal
 
+from src.config.key_file import REQUIRED_KEYS
+
 ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = ROOT / ".env"
-LLM_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY")
-DEFAULT_SECRET_NAME = "a2a/llm-api-keys"
+LLM_KEYS = REQUIRED_KEYS
+DEFAULT_SSM_PREFIX = "/a2a/llm"
 
 
 def mask_secret(value: str, visible: int = 4) -> str:
@@ -26,6 +27,11 @@ def mask_secret(value: str, visible: int = 4) -> str:
     if len(value) <= visible * 2:
         return "*" * len(value)
     return f"{value[:visible]}...{value[-visible:]}"
+
+
+def ssm_parameter_name(env_key: str, prefix: str | None = None) -> str:
+    base = (prefix or os.getenv("A2A_SSM_PARAM_PREFIX", DEFAULT_SSM_PREFIX)).rstrip("/")
+    return f"{base}/{env_key}"
 
 
 def _load_dotenv() -> Path | None:
@@ -53,46 +59,47 @@ def _missing_llm_keys() -> list[str]:
     return [key for key in LLM_KEYS if not os.getenv(key)]
 
 
-def _should_use_aws_secrets() -> bool:
+def _should_use_ssm() -> bool:
     source = os.getenv("A2A_SECRETS_SOURCE", "auto").lower()
     if source == "local":
         return False
-    if source == "aws":
+    if source in ("ssm", "aws"):
         return True
     if os.getenv("A2A_USE_AWS_SECRETS", "").lower() in ("1", "true", "yes"):
+        return True
+    if os.getenv("A2A_USE_SSM_PARAMETERS", "").lower() in ("1", "true", "yes"):
         return True
     return bool(_missing_llm_keys())
 
 
-def _load_aws_secrets() -> str | None:
-    secret_name = os.getenv("A2A_LLM_SECRET_NAME", DEFAULT_SECRET_NAME)
+def _load_ssm_parameters() -> str | None:
+    prefix = os.getenv("A2A_SSM_PARAM_PREFIX", DEFAULT_SSM_PREFIX)
     region = os.getenv("AWS_REGION", "ap-south-1")
 
     try:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
 
-        client = boto3.client("secretsmanager", region_name=region)
-        response = client.get_secret_value(SecretId=secret_name)
-        payload = json.loads(response["SecretString"])
-        if not isinstance(payload, dict):
-            raise ValueError("SecretString must be a JSON object")
-
+        client = boto3.client("ssm", region_name=region)
         loaded = 0
         for key in LLM_KEYS:
-            value = payload.get(key, "")
-            if value and key not in os.environ:
-                os.environ[key] = str(value)
+            if os.getenv(key):
+                continue
+            name = ssm_parameter_name(key, prefix)
+            response = client.get_parameter(Name=name, WithDecryption=True)
+            value = response.get("Parameter", {}).get("Value", "")
+            if value:
+                os.environ[key] = value
                 loaded += 1
 
         if loaded == 0 and _missing_llm_keys():
-            raise ValueError("No LLM keys found in secret payload")
-        return f"aws-secretsmanager://{secret_name}"
-    except (ClientError, BotoCoreError, ValueError, json.JSONDecodeError):
+            raise ValueError("No LLM keys loaded from SSM")
+        return f"aws-ssm://{prefix}"
+    except (ClientError, BotoCoreError, ValueError):
         return None
 
 
-def load_project_env() -> Literal["local", "aws", "mixed", "none"]:
+def load_project_env() -> Literal["local", "ssm", "mixed", "none"]:
     """
     Load secrets into process env.
     Returns source marker for logging/diagnostics.
@@ -100,14 +107,14 @@ def load_project_env() -> Literal["local", "aws", "mixed", "none"]:
     dotenv_loaded = _load_dotenv() is not None
     had_missing = bool(_missing_llm_keys())
 
-    aws_loaded = False
-    if _should_use_aws_secrets() and _missing_llm_keys():
-        aws_loaded = _load_aws_secrets() is not None
+    ssm_loaded = False
+    if _should_use_ssm() and _missing_llm_keys():
+        ssm_loaded = _load_ssm_parameters() is not None
 
-    if dotenv_loaded and aws_loaded:
+    if dotenv_loaded and ssm_loaded:
         return "mixed"
-    if aws_loaded:
-        return "aws"
+    if ssm_loaded:
+        return "ssm"
     if dotenv_loaded:
         return "local"
     if not had_missing:

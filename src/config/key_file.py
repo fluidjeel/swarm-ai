@@ -78,7 +78,7 @@ def format_key_file(values: dict[str, str]) -> str:
     lines = [
         "# A2A LLM API Keys",
         "# Local file only. Never commit to git.",
-        "# Used by setup_local_env.py and sync_secrets_manager.py",
+        "# Used by setup_local_env.py and sync_ssm_parameters.py",
         "",
     ]
     for key in REQUIRED_KEYS:
