@@ -8,6 +8,14 @@ api_keys.txt.bak
 !.env.example
 secrets/
 *.pem
+
+# Local IDE / agent config (never commit API keys)
+~/
+~/.claude
+~/.claude/
+~/.claude.json
+.claude/
+.claude.json
 __pycache__/
 *.pyc
 .venv/
