@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.evals.llm_client import LLMClientError, call_llm
+from src.config.secrets import load_project_env
+from src.evals.llm_client import LLMClientError, call_llm, supported_providers
 from src.evals.parser import parse_agent_output
 from src.evals.prompt_loader import load_prompt
 from src.evals.report import EvalCaseResult, EvalReport
@@ -51,13 +52,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default=os.getenv("EVAL_LLM_PROVIDER", "openai"),
-        choices=["openai", "anthropic"],
+        choices=supported_providers(),
         help="LLM provider for live eval mode",
     )
     parser.add_argument(
         "--model",
         default=os.getenv("EVAL_LLM_MODEL", ""),
-        help="Model name (defaults: gpt-4o-mini / claude-3-5-haiku-latest)",
+        help="Model name (provider-specific default when empty)",
     )
     parser.add_argument(
         "--prompt-version",
@@ -79,9 +80,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def _default_model(provider: str) -> str:
-    if provider == "anthropic":
-        return "claude-3-5-haiku-latest"
-    return "gpt-4o-mini"
+    defaults = {
+        "openai": "gpt-4o-mini",
+        "gemini": "gemini-2.0-flash",
+        "grok": "grok-4.3",
+        "deepseek": "deepseek-chat",
+    }
+    return defaults.get(provider, "gpt-4o-mini")
 
 
 def _load_fixtures(agent_filter: str) -> list[dict]:
@@ -211,6 +216,7 @@ def _run_live(
 
 
 def main() -> int:
+    load_project_env()
     args = parse_args()
     fixtures = _load_fixtures(args.agent)
     if args.limit > 0:
