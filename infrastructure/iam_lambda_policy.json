@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DynamoDBReadTracesOnly",
+      "Effect": "Allow",
+      "Action": ["dynamodb:Query", "dynamodb:Scan"],
+      "Resource": "arn:aws:dynamodb:ap-south-1:YOUR_AWS_ACCOUNT_ID:table/A2A_Traces"
+    }
+  ]
+}

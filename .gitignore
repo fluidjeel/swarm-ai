@@ -1,0 +1,4 @@
+data/fyers_token.json
+.env
+.env.*
+*.pem
