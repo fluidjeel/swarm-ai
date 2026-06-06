@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from src.data.base_provider import BreadthSnapshot, OptionChainPcr
 from src.features.regime_metrics import _derive_vix_trend, compute_regime_metrics
 
 
@@ -32,6 +33,9 @@ class _FakeProvider:
             {"timestamp": 1, "open": 14.0, "high": 14.5, "low": 13.8, "close": 14.0, "volume": 0},
             {"timestamp": 2, "open": 14.0, "high": 14.8, "low": 14.0, "close": 14.6, "volume": 0},
         ]
+
+    async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
+        return BreadthSnapshot(ad_ratio=1.0, advancers=25, decliners=25, unchanged=0, sample_size=50)
 
 
 class RegimeMetricsTests(unittest.IsolatedAsyncioTestCase):

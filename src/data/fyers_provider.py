@@ -8,17 +8,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
 from src.data.base_provider import (
+    BreadthSnapshot,
     MarketDataError,
     MarketDataProvider,
     MarketDataTimeoutError,
     OhlcvBar,
     OptionChainPcr,
 )
+from src.data.nifty50_symbols import load_nifty50_symbols
 
 T = TypeVar("T")
 
 DEFAULT_VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
+DEFAULT_NIFTY_INDEX = "NSE:NIFTY50-INDEX"
 DEFAULT_REQUEST_TIMEOUT_SEC = 15.0
+FYERS_QUOTES_BATCH_SIZE = 50
 
 
 def _require_fyers_credentials() -> tuple[str, str]:
@@ -93,6 +97,63 @@ def _extract_quote_last_price(response: dict[str, Any], symbol: str) -> float:
                 return float(values[key])
 
     raise MarketDataError(f"Could not parse last price for {symbol} from Fyers quotes.")
+
+
+def _extract_quote_prices(values: dict[str, Any]) -> tuple[float | None, float | None]:
+    last_price = None
+    prev_close = None
+    for key in ("lp", "last_price", "close"):
+        if key in values and values[key] is not None:
+            last_price = float(values[key])
+            break
+    for key in ("prev_close_price", "prev_close", "pc", "previous_close"):
+        if key in values and values[key] is not None:
+            prev_close = float(values[key])
+            break
+    return last_price, prev_close
+
+
+def _parse_breadth_from_quotes(response: dict[str, Any]) -> BreadthSnapshot:
+    quotes = response.get("d")
+    if not isinstance(quotes, list) or not quotes:
+        raise MarketDataError("Fyers quotes response empty for breadth calculation.")
+
+    advancers = 0
+    decliners = 0
+    unchanged = 0
+    used = 0
+
+    for item in quotes:
+        if not isinstance(item, dict):
+            continue
+        values = item.get("v")
+        if not isinstance(values, dict):
+            continue
+        last_price, prev_close = _extract_quote_prices(values)
+        if last_price is None or prev_close is None or prev_close <= 0:
+            continue
+        used += 1
+        if last_price > prev_close:
+            advancers += 1
+        elif last_price < prev_close:
+            decliners += 1
+        else:
+            unchanged += 1
+
+    if used == 0:
+        raise MarketDataError("No usable Nifty 50 quote rows for breadth calculation.")
+
+    return BreadthSnapshot(
+        ad_ratio=advancers / max(decliners, 1),
+        advancers=advancers,
+        decliners=decliners,
+        unchanged=unchanged,
+        sample_size=used,
+    )
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
 def _sum_option_oi(chain: list[dict[str, Any]]) -> tuple[int, int, int | None]:
@@ -280,3 +341,39 @@ class FyersMarketDataProvider(MarketDataProvider):
             return _parse_option_chain_pcr(response, symbol=symbol)
 
         return await self._call_with_timeout(_fetch, context=f"get_option_chain_pcr({symbol})")
+
+    async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
+        symbols = list(load_nifty50_symbols())
+        batches = _chunked(symbols, FYERS_QUOTES_BATCH_SIZE)
+
+        def _fetch() -> BreadthSnapshot:
+            client = self._get_client()
+            total_advancers = 0
+            total_decliners = 0
+            total_unchanged = 0
+            total_used = 0
+
+            for batch in batches:
+                payload = {"symbols": ",".join(batch)}
+                response = _assert_fyers_ok(
+                    client.quotes(payload),
+                    context="quotes(nifty50_breadth)",
+                )
+                snapshot = _parse_breadth_from_quotes(response)
+                total_advancers += snapshot.advancers
+                total_decliners += snapshot.decliners
+                total_unchanged += snapshot.unchanged
+                total_used += snapshot.sample_size
+
+            if total_used == 0:
+                raise MarketDataError("Nifty 50 breadth calculation returned zero usable quotes.")
+
+            return BreadthSnapshot(
+                ad_ratio=total_advancers / max(total_decliners, 1),
+                advancers=total_advancers,
+                decliners=total_decliners,
+                unchanged=total_unchanged,
+                sample_size=total_used,
+            )
+
+        return await self._call_with_timeout(_fetch, context="get_nifty50_ad_ratio")

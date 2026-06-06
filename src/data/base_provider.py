@@ -17,6 +17,17 @@ class OhlcvBar(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
+class BreadthSnapshot:
+    """Advancers / decliners snapshot for index breadth proxy."""
+
+    ad_ratio: float
+    advancers: int
+    decliners: int
+    unchanged: int
+    sample_size: int
+
+
+@dataclass(frozen=True, slots=True)
 class OptionChainPcr:
     """Put/Call ratio for the active option expiry."""
 
@@ -60,3 +71,7 @@ class MarketDataProvider(ABC):
         strikecount: int = 50,
     ) -> OptionChainPcr:
         """Return put/call open-interest ratio for the current expiry."""
+
+    @abstractmethod
+    async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
+        """Return Nifty 50 advancers/decliners ratio (v1 breadth proxy)."""

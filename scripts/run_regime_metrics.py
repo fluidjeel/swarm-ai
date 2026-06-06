@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Epic 2.1 smoke test: fetch regime metrics from Fyers and print strict JSON.
+Epic 2.1 Feature Engine runner: fetch full feature payload from Fyers.
 
 Examples:
-  # One-shot smoke test
+  # One-shot smoke test (full HLDD payload)
   python scripts/run_regime_metrics.py
 
+  # Legacy 3-field regime snapshot
+  python scripts/run_regime_metrics.py --legacy
+
   # Poll every 5 minutes for 4 hours (Epic 2.1 soak harness)
-  python scripts/run_regime_metrics.py --loop --interval-secs 300 --duration-secs 14400
+  python scripts/run_regime_metrics.py --loop --interval-secs 300 --duration-secs 14400 --log-memory
 
 Requires FYERS_APP_ID and FYERS_ACCESS_TOKEN in the environment.
 """
@@ -25,11 +28,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data.fyers_provider import FyersMarketDataProvider
+from src.features.feature_engine import (
+    FeatureEngineError,
+    compute_feature_payload,
+    poll_feature_payload,
+)
 from src.features.regime_metrics import RegimeMetricsError, compute_regime_metrics, poll_regime_metrics
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run A2A regime metrics via Fyers")
+    parser = argparse.ArgumentParser(description="Run A2A Feature Engine via Fyers")
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Emit legacy 3-field regime metrics instead of full feature payload",
+    )
     parser.add_argument(
         "--loop",
         action="store_true",
@@ -50,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-secs",
         type=float,
-        default=15.0,
+        default=30.0,
         help="Per-tick API timeout budget",
     )
     parser.add_argument(
@@ -68,12 +81,17 @@ def parse_args() -> argparse.Namespace:
 
 async def _run_once(args: argparse.Namespace) -> int:
     provider = FyersMarketDataProvider(request_timeout_sec=args.timeout_secs)
-    metrics = await compute_regime_metrics(
-        provider,
-        option_symbol=args.option_symbol,
-        request_timeout_sec=args.timeout_secs,
-    )
-    print(json.dumps(metrics, separators=(",", ":")))
+    if args.legacy:
+        metrics = await compute_regime_metrics(
+            provider,
+            option_symbol=args.option_symbol,
+            request_timeout_sec=args.timeout_secs,
+        )
+        print(json.dumps(metrics, separators=(",", ":")))
+        return 0
+
+    payload = await compute_feature_payload(provider, request_timeout_sec=args.timeout_secs)
+    print(json.dumps(payload, separators=(",", ":")))
     return 0
 
 
@@ -84,15 +102,26 @@ async def _run_loop(args: argparse.Namespace) -> int:
     def _on_tick(payload: dict) -> None:
         print(json.dumps(payload, separators=(",", ":")), flush=True)
 
-    summary = await poll_regime_metrics(
-        provider,
-        interval_secs=args.interval_secs,
-        duration_secs=duration,
-        option_symbol=args.option_symbol,
-        request_timeout_sec=args.timeout_secs,
-        log_memory=args.log_memory,
-        on_tick=_on_tick,
-    )
+    if args.legacy:
+        summary = await poll_regime_metrics(
+            provider,
+            interval_secs=args.interval_secs,
+            duration_secs=duration,
+            option_symbol=args.option_symbol,
+            request_timeout_sec=args.timeout_secs,
+            log_memory=args.log_memory,
+            on_tick=_on_tick,
+        )
+    else:
+        summary = await poll_feature_payload(
+            provider,
+            interval_secs=args.interval_secs,
+            duration_secs=duration,
+            request_timeout_sec=args.timeout_secs,
+            log_memory=args.log_memory,
+            on_tick=_on_tick,
+        )
+
     print(
         json.dumps(
             {
@@ -122,7 +151,7 @@ def main() -> int:
 
     try:
         return asyncio.run(_async_main(args))
-    except RegimeMetricsError as exc:
+    except (FeatureEngineError, RegimeMetricsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

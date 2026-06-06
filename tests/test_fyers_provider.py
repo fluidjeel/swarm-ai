@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from src.data.fyers_provider import (
+    _parse_breadth_from_quotes,
     _parse_history_candles,
     _parse_option_chain_pcr,
     _sum_option_oi,
@@ -43,6 +44,20 @@ class FyersProviderParsingTests(unittest.TestCase):
         self.assertEqual(pcr.pcr, 1.0)
         self.assertEqual(pcr.call_oi, 150)
         self.assertEqual(pcr.put_oi, 150)
+
+    def test_parse_breadth_from_quotes(self) -> None:
+        response = {
+            "s": "ok",
+            "d": [
+                {"v": {"lp": 101.0, "prev_close_price": 100.0}},
+                {"v": {"lp": 99.0, "prev_close_price": 100.0}},
+                {"v": {"lp": 100.0, "prev_close_price": 100.0}},
+            ],
+        }
+        breadth = _parse_breadth_from_quotes(response)
+        self.assertEqual(breadth.advancers, 1)
+        self.assertEqual(breadth.decliners, 1)
+        self.assertEqual(breadth.unchanged, 1)
 
 
 if __name__ == "__main__":

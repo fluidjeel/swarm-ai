@@ -1,4 +1,5 @@
 data/fyers_token.json
+data/pcr_history.json
 .env
 .env.local
 .env.*.local
