@@ -1,7 +1,9 @@
 data/fyers_token.json
 .env
-.env.*
+.env.local
+.env.*.local
 api_keys.txt
+!.env.example
 secrets/
 *.pem
 __pycache__/
