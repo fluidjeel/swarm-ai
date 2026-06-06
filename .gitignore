@@ -2,3 +2,6 @@ data/fyers_token.json
 .env
 .env.*
 *.pem
+__pycache__/
+*.pyc
+.venv/
