@@ -1,103 +1,160 @@
-Execution Plan & Roadmap: A2A Trading Engine v4.0
+# Execution Plan & Roadmap: A2A Trading Engine v4.1
 
-This execution plan breaks down the build into 5 chronological phases. Do not advance to the next phase until the Definition of Done (DoD) for the current phase is fully satisfied.
+**Status:** v4.1 Deterministic Core complete (218 tests, 60 subtests). v4.0 LLM-in-the-hot-path architecture deprecated.
 
-Phase 1: Observability, Security, & Environment Core
+This document tracks which phases are **done**, **in flight**, **gated**, and **future** for the v4.1 pivot and beyond. The v4.0 phases (1-5) are mapped to v4.1 status below.
 
-Objective: Build the scaffolding that ensures the agents will not fail silently and cannot be compromised by bad data.
+---
 
-Epic 1.1: AWS & Local Environment Standup
+## Phase 0 — Safety Pivot (June 2026)
 
-Tasks: Provision EC2 t3.small (ap-south-1). Allocate Elastic IP and whitelist with Fyers. Setup S3 bucket (a2a-prompts). Provision DynamoDB table (A2A_Traces).
+**Objective:** Remove the dangerous v4.0 hot-path LLM/Vector DB architecture.
 
-DoD: EC2 can successfully ping Fyers API; IAM roles permit EC2 to write to DynamoDB and read from S3.
+| Status | Item | Notes |
+|--------|------|-------|
+| ✅ | Purge `similar_regimes` from `AgentContext` | Field + validator + exports removed |
+| ✅ | `STALE_QUOTE_POINTS = 10.0` constant | NIFTY points (not option premium) |
+| ✅ | Add `feature_snapshot_price`, `data_degraded`, `baseline_initialized` | `AgentContext` extension |
+| ✅ | Tick lock (`FileTickLock` with `fcntl` / `msvcrt`) | Cross-process; blocks overlapping 5-min loops |
+| ✅ | `bootstrap_session()` once per day | Refuses outside INTRADAY/SQUARE_OFF |
+| ✅ | `.cursorrules` Prime Directive rewrite | v4.1 wording; LLM-in-hot-path explicitly forbidden |
+| ✅ | Archive deprecated LLM prompts | `prompts/archive/` with deprecation README |
+| ✅ | Defensive StrategyName StrEnum | 4 values; Pydantic rejects unknown strings |
 
-Epic 1.2: Cross-Cutting Infrastructure Logic
+**DoD:** ✅ All 9 items shipped. The hot path has zero LLM imports (verified by `grep`).
 
-Tasks:
+---
 
-Write AgentContext dataclass in Python.
+## Phase 1 — Infrastructure & Recovery (✅ Done)
 
-Implement the @trace_agent decorator using boto3 to log to DynamoDB.
+| Status | Item | Notes |
+|--------|------|-------|
+| ✅ | Fyers `get_positions()` provider method | Fail-closed on 5xx, auth, untagged |
+| ✅ | `broker_recovery.rebuild_from_fyers()` | Aggregates multi-leg into summary position |
+| ✅ | Multi-leg inference for untagged legs | `_infer_strategy_from_legs()` (iron_condor, strangle, straddle) |
+| ✅ | `OrphanLegError`, `PartialFillError`, `UntaggedPositionError` | Distinct error classes for distinct failure modes |
+| ✅ | `session_clock.py` with NSE holidays | Hardcoded 2026 calendar |
+| ✅ | `baseline_initialized` on first LTP | From broker LTP, not next bar close |
 
-Write the Security Sanitizer data validation functions.
+**DoD:** ✅ 100+ tests pass. Broker is source of truth on boot. A 4-leg iron condor reconstructs as 1 summary with 4 legs.
 
-DoD: A dummy function wrapped in @trace_agent successfully writes a complete telemetry record to DynamoDB, and the Sanitizer successfully catches/blocks an engineered out-of-bounds integer.
+---
 
-Epic 1.3: Eval Suite & Prompt Registry
+## Phase 2 — Feature & Risk Engines (✅ Done)
 
-Tasks: Create local evals/ directory. Draft v1.md prompts for Regime and Strategy agents, upload to S3. Write eval_runner.py to parse Pydantic schemas.
+| Status | Item | Notes |
+|--------|------|-------|
+| ✅ | Feature Engine with PCR momentum, AD ratio, VIX/ATR divergence | Async Python; FeatureEngineError enum |
+| ✅ | Risk Gatekeeper with 8 rules | Pure Python, no I/O |
+| ✅ | Exit Engine with multi-leg aggregation | Per-leg evaluation, ANY-EXIT aggregation |
+| ✅ | Absolute limits + risk config | Two-tier config, clamping on load |
+| ✅ | Stale-quote abort | `|live_ltp - snapshot| > 10` NIFTY points |
+| ✅ | Position sizing | `compute_allowed_lots()` based on capital |
 
-DoD: The offline eval_runner.py can invoke OpenAI/Anthropic APIs, read the S3 prompt, and output a Pass/Fail report based on schema validation.
+**DoD:** ✅ Gatekeeper rejects engineered bad inputs 100% of the time. Exit engine handles 4-leg iron condor flatten correctly.
 
-Phase 2: Deterministic State Engine (The Muscle)
+---
 
-Objective: Build the data ingestion, risk management, and exit pipelines that protect capital from the AI.
+## Phase 3 — Intraday Deterministic Core (✅ Done)
 
-Epic 2.1: The Feature Engine
+| Status | Item | Notes |
+|--------|------|-------|
+| ✅ | Agent 1 (Regime) pure Python thresholds | `src/agents/regime_classifier.py` |
+| ✅ | Agent 2 (Strategy) lookup matrix | `src/agents/strategy_selector.py` |
+| ✅ | Agent 3 (Critic) live Greeks + spread + stale-quote | `src/agents/pre_trade_critic.py` |
+| ✅ | Strike + expiry selection | `src/agents/symbol_resolver.py` with 30-delta targeting |
+| ✅ | SessionPipeline wiring | `regime → strategy → strike → critic → gatekeeper` |
+| ✅ | Perf budget | 1→2 chain <50ms; strike selection <5ms |
 
-Tasks: Connect to TrueData websocket via asyncio. Write Pandas logic for NIFTY 500 A/D ratio, Expiry-Weighted PCR Momentum, and VIX/ATR divergence.
+**DoD:** ✅ 218 tests pass. End-to-end tick: bootstrap → regime → strategy → strike → critic → gatekeeper. Net delta/gamma across legs drives Agent 3 bounds.
 
-DoD: Script runs for 4 hours without memory leaks, outputting accurate JSON metrics every 5 minutes.
+---
 
-Epic 2.2: Risk Gatekeeper & Exit Engine
+## Phase 4 — Execution (In Flight)
 
-Tasks: Implement the Python classes containing the hard mathematical rules (VIX Ceiling > 18, DTE <= 1, Max Daily Loss -₹8000, 2x ATR trailing stop, 60% Theta capture).
+| Status | Item | Notes |
+|--------|------|-------|
+| ✅ | Paper-mode soak harness | `src/orchestration/paper_mode.py` with 5-min cadence |
+| ✅ | `dry_run` flag in SessionPipeline | Logs `PAPER_APPROVE` / `PAPER_EXIT`, no execution |
+| ✅ | Paper runbook | `docs/PAPER_MODE_RUNBOOK.md` |
+| ⏳ | 4h paper soak against live Fyers | In progress; required before live orders |
+| ⬜ | `ExecutionPort` interface (Phase 4.1) | Subclassed by `FyersExecutionPort` (Phase 4.2) |
+| ⬜ | Idempotent order submission | Tick-derived order keys; broker orderbook query before retry |
+| ⬜ | Fyers 502/504 retry with backoff | Exponential, max 3 attempts |
+| ⬜ | Fill reconciliation | `LegActionIntent` → fill verification via `GET /orderbook` |
+| ⬜ | Capital deployment | ₹2.5L in Liquid BeES + ₹3.5L trading capital |
 
-DoD: Unit tests confirm that the Gatekeeper rejects engineered bad inputs (e.g., trying to place an Iron Condor on expiry day) 100% of the time.
+**DoD (Phase 4 complete):** 4h paper soak shows < 1% broker errors and reasonable approve rate. Then live with 1-lot constraint and ₹8,000 daily cap.
 
-Phase 3: The Pre-Market & Intraday Swarm (The Brain)
+---
 
-Objective: Bring the first 6 agents (Agents 0 through 5) online and connect them via the Invocation Router.
+## Phase 5 — Periphery & Observability (Gated on Phase 4)
 
-Epic 3.1: Pre-Market Scout (Agent 0)
+| Status | Item | Notes |
+|--------|------|-------|
+| ⬜ | Agent 0 (Pre-Market Scout) on Lambda | 08:00 IST cron; writes `overnight_context.json` to S3 |
+| ⬜ | Telegram HITL (Agent 5) on Lambda | Function URL; processes Approve/Veto callbacks |
+| ⬜ | End-of-day archiver on Lambda | DDB traces → Parquet in S3 Data Lake |
+| ⬜ | Agent 6 (Analyzer) trace clustering | Embedding-based; runs nightly |
+| ⬜ | Agent 7 (Parameter Tuner) on Lambda | Proposes `risk_config.json` diffs; clamped by `absolute_limits`; HITL-gated |
+| ⬜ | `TraceLogger` to DynamoDB | Per-tick rows; 5-year retention for SEBI |
 
-Tasks: Write the async scraper for SGX/GIFT Nifty and FII/DII data. Set cron to run at 8:00 AM.
+**DoD (Phase 5 complete):** Agent 0 produces a real `overnight_context.json` daily. Agent 7 produces a parameter proposal that passes human review.
 
-DoD: Automatically generates overnight_context.json daily before 8:45 AM.
+---
 
-Epic 3.2: Intraday Core (Agents 1, 2, & 3)
+## Track 1 — v4.1 Ship (In Flight)
 
-Tasks:
+**Goal:** Lock the deterministic core, validate via paper soak, deploy live with 1-lot constraint.
 
-Build Regime Classifier (Agent 1).
+| Milestone | Status |
+|-----------|--------|
+| 0+1+2+3+4 deterministic core | ✅ |
+| Paper-mode harness | ✅ |
+| 4h paper soak | ⏳ |
+| Capital deployment ₹6L | ⬜ |
+| Live with 1 lot constraint | ⬜ |
 
-Integrate local Vector Store (FAISS/Pinecone) for semantic memory and build Strategy Selector (Agent 2).
+**Exit criteria:** 20+ hours of paper-soak data over multiple trading days, with `PAPER_APPROVE` count > 0 and broker error rate < 1%.
 
-Build the Adversarial Critic (Agent 3) with absolute veto logic.
+---
 
-DoD: The entire sequence (Agent 1 -> Agent 2 -> Vector Query -> Agent 3) executes successfully in the Eval Suite offline, with Agent 3 correctly vetoing contradictory trades.
+## Track 2 — v4.2 Positional Weekly Spreads (Gated on Track 1)
 
-Epic 3.3: Position Advisor (Agent 4) & HITL Gateway (Agent 5)
+**Goal:** Add a sibling pipeline for positional weekly spreads on daily/4-hour signals. Same risk profile as Track 1 (defined-risk) but with better signal-to-noise.
 
-Tasks: Build Agent 4 for roll logic. Integrate Telegram API for Agent 5, formatting structured message packets with interactive buttons.
+| Item | Notes |
+|------|-------|
+| `StrategyClass.POSITIONAL` enum | On `AgentContext`; defaults to `INTRADAY` |
+| `positional_run_chain` | Mirror of `_run_entry_chain` with 4-hour cadence |
+| `ExpirySelectionError` extended | Positional 1-4 week DTE band |
+| Weekly circuit-breaker cap | -₹15,000 weekly, separate from daily cap |
+| New `StrategyName` entries | `BULL_CALL_SPREAD_WEEKLY`, `BEAR_PUT_SPREAD_WEEKLY` (vertical, 50/20 delta) |
 
-DoD: Sending an UNCERTAIN payload to the Router successfully halts execution and pings Telegram with formatted decision options.
+**Gating:** Track 1 must demonstrate positive expectancy in paper soak first.
 
-Phase 4: Execution & Full Integration
+---
 
-Objective: Connect the intelligence to the broker and deploy capital.
+## Track 3 — v4.3+ Scaled (Gated on Track 2)
 
-Epic 4.1: Invocation Router & Fyers Execution
+**Goal:** Scale to ₹10L+ capital with controlled naked-strategy exposure.
 
-Tasks: Build the master state machine that receives AgentContext. Route approved contexts through the Gatekeeper to the Fyers_Client.
+| Item | Notes |
+|------|-------|
+| 2× credit stop-loss rules | New gatekeeper rule for naked strategies |
+| Sub-portfolio caps | Separate ₹25k cap for naked-strategy sub-portfolio |
+| `short_strangle` with stop | Returns to enum with stop-loss guarantee |
+| NIFTY futures positional | 1 lot, 2% mechanical stop, weekly cap |
+| Daily token rotation Lambda | Fyers access token expires 03:30 IST |
 
-DoD: System can run autonomously in Paper Trading mode, handling full lifecycles from Agent 0 Pre-Market priming to Exit Engine flattening.
+**Gating:** Track 2 must demonstrate positive expectancy over 50+ paper trades.
 
-Capital Deployment: Once paper-trading DoD is met, pledge ₹2.5L in Liquid BeES and deploy live on 1-lot constraints.
+---
 
-Phase 5: Post-Market & Compilation (The Moat)
+## Track Independence
 
-Objective: Activate the self-improvement and compilation pipeline (Agents 6 and 7).
+The three tracks are **independent code paths** but share the `AgentContext` and `RiskConfig`. Track 2 adds a new entry chain (`positional_run_chain`); Track 3 extends `StrategyName` and adds new gatekeeper rules. Tracks can be developed in parallel once Track 1 is shipped.
 
-Epic 5.1: Nightly Analyzer (Agent 6)
+---
 
-Tasks: Write AWS Lambda function triggered via EventBridge at 6:00 PM IST. Implement embedding clustering on DynamoDB traces.
-
-DoD: Sends an accurate daily summary of clustered trade contexts and PnL to Telegram.
-
-Epic 5.2: The Compiler (Agent 7)
-
-Tasks: Implement weekend logic to check the Golden Goose threshold (10 occ, 65% win, 1.5x expectancy). Generate Shadow Mode proposals.
-
-DoD: Agent successfully identifies a historical pattern from the traces and outputs a formatted compilation proposal document.
+Last updated: 2026-06-07 (v4.1 ship readiness review)

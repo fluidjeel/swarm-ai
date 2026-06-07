@@ -20,6 +20,9 @@ from src.agents.symbol_resolver import (
 )
 from src.config.risk_config import RiskConfig, load_risk_config
 from src.core.context import AgentContext, CriticDecision, CriticStatus, RegimeLabel, StrategyName
+from src.data.base_provider import OptionGreeks
+from src.execution.noop_port import NoOpExecutionPort
+from src.execution.port import ExecutionPort, LegActionIntent, OrderAck, idem_key
 from src.data.base_provider import FyersAuthError, MarketDataError, MarketDataProvider, OhlcvBar, Quote
 from src.risk.gatekeeper import GatekeeperVerdict, evaluate_from_context
 from src.features.feature_engine import (
@@ -41,6 +44,14 @@ from src.risk.exit_engine import (
     ExitDecision,
     ExitEngine,
 )
+
+
+NIFTY_LOT_SIZE = 50
+_ENTRY_LEG_SIDES: dict[StrategyName, tuple[str, ...]] = {
+    StrategyName.IRON_CONDOR: ("BUY", "SELL", "SELL", "BUY"),
+    StrategyName.BULL_CALL_SPREAD: ("BUY", "SELL"),
+    StrategyName.BEAR_PUT_SPREAD: ("BUY", "SELL"),
+}
 
 
 class SessionPipelineError(RuntimeError):
@@ -97,9 +108,11 @@ class SessionPipeline:
         risk_config: RiskConfig | None = None,
         dry_run: bool = False,
         paper_logger: PaperEventLogger | None = None,
+        execution_port: ExecutionPort | None = None,
     ) -> None:
         self._provider = provider
         self._exit_engine = exit_engine or ExitEngine()
+        self._execution_port = execution_port or NoOpExecutionPort()
         self._risk_config = risk_config or load_risk_config()
         self._request_timeout_sec = request_timeout_sec
         self._pcr_history_path = pcr_history_path
@@ -229,6 +242,7 @@ class SessionPipeline:
             ) from exc
 
         live_underlying_ltp: float | None = None
+        tick_timestamp = datetime.now(IST).isoformat()
         try:
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx)
@@ -240,7 +254,10 @@ class SessionPipeline:
                 )
 
             if not ctx.has_open_position and not ctx.is_halted:
-                ctx, live_underlying_ltp = await self._run_entry_chain(ctx)
+                ctx, live_underlying_ltp = await self._run_entry_chain(
+                    ctx,
+                    tick_timestamp=tick_timestamp,
+                )
                 self._maybe_log_paper_approve(ctx)
 
             if not ctx.has_open_position:
@@ -276,7 +293,12 @@ class SessionPipeline:
         finally:
             self._tick_lock.release()
 
-    async def _run_entry_chain(self, ctx: AgentContext) -> tuple[AgentContext, float | None]:
+    async def _run_entry_chain(
+        self,
+        ctx: AgentContext,
+        *,
+        tick_timestamp: str,
+    ) -> tuple[AgentContext, float | None]:
         ctx = classify_regime(ctx, config=self._risk_config)
         ctx = select_strategy(ctx)
         strategy = (
@@ -290,6 +312,7 @@ class SessionPipeline:
             return ctx, live_underlying_ltp
 
         if ctx.regime_decision != RegimeLabel.UNCERTAIN:
+            selected_legs: list[OptionGreeks] = []
             try:
                 expiry_ts = select_expiry(ctx, config=self._risk_config)
                 greeks_list = await self._provider.get_option_chain_greeks(
@@ -335,8 +358,73 @@ class SessionPipeline:
                     )
                 )
             ctx = evaluate_from_context(ctx, config=self._risk_config)
+            if self._dry_run and selected_legs:
+                await self._submit_approved_entry_legs(
+                    ctx,
+                    selected_legs=selected_legs,
+                    tick_timestamp=tick_timestamp,
+                )
 
         return ctx, live_underlying_ltp
+
+    async def _submit_approved_entry_legs(
+        self,
+        ctx: AgentContext,
+        *,
+        selected_legs: list[OptionGreeks],
+        tick_timestamp: str,
+    ) -> None:
+        gatekeeper = ctx.gatekeeper_decision
+        if gatekeeper is None or gatekeeper.verdict != GatekeeperVerdict.APPROVE:
+            return
+        strategy = ctx.strategy_decision.strategy if ctx.strategy_decision else None
+        if strategy is None:
+            return
+        sides = _ENTRY_LEG_SIDES.get(strategy)
+        if sides is None or len(sides) != len(selected_legs):
+            return
+
+        for leg_greek, side in zip(selected_legs, sides, strict=True):
+            leg_id = leg_greek.symbol
+            intent = LegActionIntent(
+                leg_id=leg_id,
+                symbol=leg_greek.symbol,
+                side=side,  # type: ignore[arg-type]
+                qty=NIFTY_LOT_SIZE,
+                tag=idem_key(
+                    tick_timestamp=tick_timestamp,
+                    leg_id=leg_id,
+                    symbol=leg_greek.symbol,
+                    side=side,
+                ),
+            )
+            ack = await self._execution_port.submit_legs(intent)
+            self._maybe_log_order_ack(ctx, intent=intent, ack=ack)
+
+    def _maybe_log_order_ack(
+        self,
+        ctx: AgentContext,
+        *,
+        intent: LegActionIntent,
+        ack: OrderAck,
+    ) -> None:
+        if not self._dry_run or self._paper_logger is None:
+            return
+        self._paper_logger.log_paper_row(
+            {
+                "event": "PAPER_ORDER_ACK",
+                "session_id": ctx.session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "leg_id": intent.leg_id,
+                "symbol": intent.symbol,
+                "side": intent.side,
+                "qty": intent.qty,
+                "tag": intent.tag,
+                "order_id": ack.order_id,
+                "status": ack.status,
+                "reason": ack.reason,
+            }
+        )
 
     def _maybe_log_paper_approve(self, ctx: AgentContext) -> None:
         if not self._dry_run or self._paper_logger is None:

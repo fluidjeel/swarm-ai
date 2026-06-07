@@ -4,7 +4,7 @@ Paper mode runs the v4.1 deterministic pipeline against **live Fyers market data
 
 ## Pre-flight checklist
 
-1. **Fyers credentials** — `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN` in `.env` or SSM (`/a2a/llm/FYERS_*` or `A2A_FYERS_SSM_PREFIX`).
+1. **Fyers credentials** — `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN` in `.env` or SSM (`/a2a/llm/FYERS_*` or `A2A_FYERS_SSM_PREFIX`). Generate on laptop: `python scripts/fyers_authenticate.py` (auto-syncs local `.env` + SSM; add `--sync-ec2-ssh` for EC2 `.env`).
 2. **Token freshness** — Fyers access tokens expire daily. Re-auth before the soak if the token is from a prior session.
 3. **Trading day** — Run on an NSE weekday that is not a holiday (`session_clock.is_trading_day`).
 4. **Session phase** — Bootstrap runs during INTRADAY or SQUARE_OFF (09:30–15:20 IST).

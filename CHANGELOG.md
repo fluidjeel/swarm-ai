@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-07 — Phase 4.1 ExecutionPort + Fyers auth sync
+
+- Add `src/execution/` — `ExecutionPort`, `MockExecutionPort`, `NoOpExecutionPort`, `idem_key`
+- Inject `execution_port` into `SessionPipeline`; log `PAPER_ORDER_ACK` on dry-run approve
+- Add `tests/test_execution_port.py` (idempotency, fail-closed, health latency)
+- Add `docs/SOAK_TEST_RECIPE.md`
+- Enhance `scripts/fyers_authenticate.py` — sync local `.env`, AWS SSM, optional EC2 SSH
+- 223 tests pass
+
 ## 2026-06-07 — Step 4.4 defensive fence
 
 - Add StrategyName StrEnum to src/core/context.py (4 values)
