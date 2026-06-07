@@ -25,6 +25,12 @@ class RiskConfig(BaseModel):
     max_lots_per_trade: int = Field(default=4, ge=1)
     max_loss_per_trade_inr: float = Field(default=4000.0, gt=0.0)
     max_loss_per_day_inr: float = Field(default=8000.0, gt=0.0)
+    delta_target_short_put: float = Field(default=-0.30, ge=-1.0, le=0.0)
+    delta_target_short_call: float = Field(default=0.30, ge=0.0, le=1.0)
+    delta_tolerance: float = Field(default=0.10, gt=0.0, le=1.0)
+    max_dte_for_entry: int = Field(default=7, ge=0, le=45)
+    min_dte_for_entry: int = Field(default=1, ge=0, le=45)
+    wing_width_points: int = Field(default=200, ge=50, le=1000)
 
 
 def load_risk_config(path: Path | None = None) -> RiskConfig:

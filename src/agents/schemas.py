@@ -2,6 +2,11 @@
 Pydantic output schemas for LLM agent responses.
 
 Reference: .context/02_hldd.md §1.4 (Schema Eval)
+
+DEPRECATED v4.1: RegimeClassifierOutput and StrategySelectorOutput are LLM JSON
+output schemas. They are no longer used by the intraday path. Kept for backward
+compat with src/evals/parser.py which validates old eval fixtures. New code MUST
+NOT import these classes for the hot path.
 """
 
 from __future__ import annotations

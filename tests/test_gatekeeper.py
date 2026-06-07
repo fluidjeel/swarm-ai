@@ -45,10 +45,10 @@ class RiskGatekeeperTests(unittest.TestCase):
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
         self.assertEqual(decision.rule_id, GatekeeperRule.GAMMA_DTE_FILTER)
 
-    def test_rejects_high_vix_short_vol(self) -> None:
+    def test_rejects_high_vix_iron_condor(self) -> None:
         payload = dict(self.base_payload, vix=19.0)
         decision = self.gatekeeper.evaluate(
-            strategy="short_strangle",
+            strategy="iron_condor",
             feature_payload=payload,
             daily_realized_pnl=0.0,
         )
@@ -73,10 +73,10 @@ class RiskGatekeeperTests(unittest.TestCase):
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.APPROVE)
 
-    def test_approves_at_dte_boundary(self) -> None:
+    def test_approves_iron_condor_at_dte_boundary(self) -> None:
         payload = dict(self.base_payload, dte=2)
         decision = self.gatekeeper.evaluate(
-            strategy="short_straddle",
+            strategy="iron_condor",
             feature_payload=payload,
             daily_realized_pnl=0.0,
         )
@@ -92,19 +92,19 @@ class RiskGatekeeperTests(unittest.TestCase):
         self.assertEqual(decision.verdict, GatekeeperVerdict.REJECT)
         self.assertEqual(decision.rule_id, GatekeeperRule.GAMMA_DTE_FILTER)
 
-    def test_vix_at_exact_ceiling_passes(self) -> None:
+    def test_vix_at_exact_ceiling_passes_for_iron_condor(self) -> None:
         payload = dict(self.base_payload, vix=18.0)
         decision = self.gatekeeper.evaluate(
-            strategy="short_strangle",
+            strategy="iron_condor",
             feature_payload=payload,
             daily_realized_pnl=0.0,
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.APPROVE)
 
-    def test_vix_just_above_ceiling_rejects(self) -> None:
+    def test_vix_just_above_ceiling_rejects_iron_condor(self) -> None:
         payload = dict(self.base_payload, vix=18.01)
         decision = self.gatekeeper.evaluate(
-            strategy="short_strangle",
+            strategy="iron_condor",
             feature_payload=payload,
             daily_realized_pnl=0.0,
         )
@@ -168,17 +168,15 @@ class RiskGatekeeperTests(unittest.TestCase):
         self.assertEqual(decision.verdict, GatekeeperVerdict.APPROVE)
         self.assertEqual(decision.allowed_lots, 2)
 
-    def test_futures_slippage_cost(self) -> None:
-        self.assertEqual(round_trip_slippage("nifty_futures_long"), 150.0)
+    def test_options_slippage_cost_for_all_strategies(self) -> None:
+        self.assertEqual(round_trip_slippage("bull_call_spread"), 40.0)
+        self.assertEqual(round_trip_slippage("iron_condor"), 40.0)
         decision = self.gatekeeper.evaluate(
-            strategy="nifty_futures_long",
+            strategy="bull_call_spread",
             feature_payload=self.base_payload,
             daily_realized_pnl=0.0,
         )
-        self.assertEqual(decision.expected_round_trip_cost, 150.0)
-
-    def test_options_slippage_cost(self) -> None:
-        self.assertEqual(round_trip_slippage("bull_call_spread"), 40.0)
+        self.assertEqual(decision.expected_round_trip_cost, 40.0)
 
 
 class EvaluateFromContextTests(unittest.TestCase):

@@ -11,9 +11,10 @@ Before answering any architectural or coding query, you MUST consult the followi
 - When generating code, ensure it aligns with the persona defined in 04_finance_guru.md (Quant-focused) and 05_cloud_architect.md (AWS/Resilient-focused).
 
 ## 1. Architectural Philosophy
-- **Deterministic First:** Logic that can be written in pure, type-safe Python (using Pydantic) MUST be written in Python. Use the LLM only for high-level orchestration, regime classification, and strategy selection.
+- **v4.1 Deterministic Core:** NO LLM API calls inside SessionPipeline.run_tick() or any 5-minute intraday loop. Agents 1, 2, 3 are pure Python (thresholds / matrix / math). LLMs live in Lambda periphery (Agent 0 pre-market scout, Agent 7 parameter tuner) only.
+- **No Vector DB in intraday path.** Historical learning happens in Agent 6 (Lambda) clustering DynamoDB traces offline.
 - **Retail Constraints:** - We operate on an AWS t3.small (2GB RAM). Avoid memory-intensive libraries.
-    - We utilize the free Fyers API v3. Always respect rate limits. 
+    - We utilize the free Fyers API v3. Always respect rate limits.
     - No GPU-based local inference. We use API-based Frontier models (Claude/DeepSeek).
 - **Security & Observability:**
     - Every agent decision MUST be serialized via the `AgentContext` and recorded via the `@trace_agent` decorator to DynamoDB.
@@ -27,3 +28,11 @@ Before answering any architectural or coding query, you MUST consult the followi
 ## 3. Future-Proofing
 - Always reference `docs/FUTURE_ENHANCEMENTS.md` when proposing new features.
 - When in doubt, prefer the "Adapter Pattern" (Abstract Base Classes) so we can swap data providers (Fyers vs TrueData) without rewriting agent logic.
+
+## 4. v4.1 Prime Directive (non-negotiable)
+1. Broker GET /positions is the execution source of truth.
+2. Every tick is mutex-protected (cross-process fcntl or DynamoDB).
+3. Fail-closed on missing data — data_degraded=True aborts tick.
+4. AgentContext is the only state bus; agents read and append.
+5. STALE_QUOTE_POINTS = 10 NIFTY points is a hard ceiling.
+6. Agent 7 never deploys code — only tunes risk_config.json, clamped by absolute_limits.json, gated by Telegram HITL.

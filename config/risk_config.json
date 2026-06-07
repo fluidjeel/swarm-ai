@@ -10,5 +10,11 @@
   "max_gamma": 0.05,
   "max_lots_per_trade": 4,
   "max_loss_per_trade_inr": 4000.0,
-  "max_loss_per_day_inr": 8000.0
+  "max_loss_per_day_inr": 8000.0,
+  "delta_target_short_put": -0.30,
+  "delta_target_short_call": 0.30,
+  "delta_tolerance": 0.10,
+  "max_dte_for_entry": 7,
+  "min_dte_for_entry": 1,
+  "wing_width_points": 200
 }

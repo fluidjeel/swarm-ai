@@ -6,8 +6,10 @@ import json
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from src.agents.strategy_selector import REGIME_STRATEGY_MATRIX, select_strategy
-from src.core.context import AgentContext, OpeningRegime, RegimeLabel, StrategyDecision
+from src.core.context import AgentContext, OpeningRegime, RegimeLabel, StrategyDecision, StrategyName
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "evals" / "fixtures"
 
@@ -56,6 +58,19 @@ class StrategySelectorTests(unittest.TestCase):
         self.assertTrue(any(s.startswith("ad_ratio=") for s in signals))
         self.assertTrue(any(s.startswith("vix=") for s in signals))
 
+    def test_matrix_contains_only_allowed_strategies(self) -> None:
+        allowed = {member.value for member in StrategyName}
+        for regime, strategy in REGIME_STRATEGY_MATRIX.items():
+            with self.subTest(regime=regime):
+                self.assertIn(strategy.value, allowed)
+
+    def test_cannot_select_disallowed_strategy(self) -> None:
+        with self.assertRaises(ValidationError):
+            StrategyDecision(
+                strategy="short_strangle",
+                supporting_signals=["ad_ratio=1.10", "vix=15.00"],
+            )
+
     def test_strategy_eval_fixtures(self) -> None:
         for path in sorted(FIXTURES_DIR.glob("strategy_*.json")):
             with self.subTest(fixture=path.name):
@@ -79,10 +94,11 @@ class StrategySelectorTests(unittest.TestCase):
                     ctx = ctx.update(regime_decision=RegimeLabel.CHOPPY)
                 result = select_strategy(ctx)
                 if expected_strategy != "cash_no_trade":
-                    self.assertEqual(
-                        result.strategy_decision.strategy,
-                        REGIME_STRATEGY_MATRIX.get(ctx.regime_decision, "cash_no_trade"),
+                    expected = REGIME_STRATEGY_MATRIX.get(
+                        ctx.regime_decision,
+                        StrategyName.CASH_NO_TRADE,
                     )
+                    self.assertEqual(result.strategy_decision.strategy, expected)
 
 
 if __name__ == "__main__":

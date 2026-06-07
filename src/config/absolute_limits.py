@@ -24,6 +24,12 @@ class AbsoluteLimits(BaseModel):
     max_lots_per_trade: tuple[int, int, str] = (1, 10, "Max lots per trade")
     max_loss_per_trade_inr: tuple[float, float, str] = (500.0, 20000.0, "Per-trade loss cap")
     max_loss_per_day_inr: tuple[float, float, str] = (2000.0, 25000.0, "Daily loss cap")
+    delta_target_short_put: tuple[float, float, str] = (-0.60, -0.05, "Short put delta target")
+    delta_target_short_call: tuple[float, float, str] = (0.05, 0.60, "Short call delta target")
+    delta_tolerance: tuple[float, float, str] = (0.02, 0.30, "Strike delta tolerance")
+    max_dte_for_entry: tuple[int, int, str] = (0, 21, "Max DTE for entry")
+    min_dte_for_entry: tuple[int, int, str] = (0, 14, "Min DTE for entry")
+    wing_width_points: tuple[int, int, str] = (100, 500, "Wing width band")
 
 
 ABSOLUTE_LIMITS = AbsoluteLimits()

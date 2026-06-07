@@ -302,12 +302,9 @@ def _infer_strategy_from_legs(rows: list[dict[str, Any]]) -> str:
         raise UntaggedPositionError("No position rows to infer strategy from.")
 
     if any("FUT" in str(row.get("symbol", "")).upper() for row in rows):
-        if len(rows) != 1:
-            raise UntaggedPositionError("Multiple untagged futures legs cannot be inferred.")
-        side = rows[0].get("side")
-        if side == -1:
-            return "nifty_futures_short"
-        return "nifty_futures_long"
+        raise UntaggedPositionError(
+            "Futures positions are excluded in v4.1 (catastrophic loss risk on ₹6L account)."
+        )
 
     ce_strikes: list[float] = []
     pe_strikes: list[float] = []
@@ -319,9 +316,9 @@ def _infer_strategy_from_legs(rows: list[dict[str, Any]]) -> str:
             pe_strikes.append(strike)
 
     if len(ce_strikes) == 1 and len(pe_strikes) == 1:
-        if ce_strikes[0] == pe_strikes[0]:
-            return "short_straddle"
-        return "short_strangle"
+        raise UntaggedPositionError(
+            "1CE+1PE leg pattern (strangle/straddle) excluded in v4.1 (undefined risk)."
+        )
 
     if len(ce_strikes) == 2 and len(pe_strikes) == 2:
         ce_sorted = sorted(ce_strikes)

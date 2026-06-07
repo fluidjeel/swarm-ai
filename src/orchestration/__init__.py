@@ -8,11 +8,6 @@ from src.orchestration.context_adapters import (
     sync_circuit_breaker,
 )
 from src.orchestration.session_clock import MarketPhase, current_phase, is_trading_day
-from src.orchestration.session_pipeline import (
-    SessionPipeline,
-    SessionPipelineError,
-    SessionTickResult,
-)
 from src.orchestration.tick_lock import (
     FileTickLock,
     NullTickLock,
@@ -26,9 +21,6 @@ __all__ = [
     "NullTickLock",
     "OrphanLegError",
     "PartialFillError",
-    "SessionPipeline",
-    "SessionPipelineError",
-    "SessionTickResult",
     "TickLock",
     "TickLockError",
     "apply_feature_payload",

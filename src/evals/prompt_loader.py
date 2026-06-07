@@ -11,6 +11,28 @@ from botocore.exceptions import BotoCoreError, ClientError
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOCAL_PROMPTS_DIR = ROOT / "prompts"
 
+# v4.1 archived intraday prompts (historical eval fixtures only).
+ARCHIVED_LOCAL_PROMPTS: dict[tuple[str, str], str] = {
+    ("regime_classifier", "v1"): "archive/regime_classifier_v4.0_deprecated.md",
+    ("strategy_selector", "v1"): "archive/strategy_selector_v4.0_deprecated.md",
+}
+
+
+def _resolve_local_prompt_path(
+    local_dir: Path,
+    agent_name: str,
+    version: str,
+) -> Path:
+    local_path = local_dir / agent_name / f"{version}.md"
+    if local_path.exists():
+        return local_path
+    archived_rel = ARCHIVED_LOCAL_PROMPTS.get((agent_name, version))
+    if archived_rel is not None:
+        archive_path = local_dir / archived_rel
+        if archive_path.exists():
+            return archive_path
+    return local_path
+
 
 def load_prompt(
     agent_name: str,
@@ -28,7 +50,7 @@ def load_prompt(
     """
     s3_key = f"{agent_name}/{version}.md"
     local_dir = local_prompts_dir or DEFAULT_LOCAL_PROMPTS_DIR
-    local_path = local_dir / agent_name / f"{version}.md"
+    local_path = _resolve_local_prompt_path(local_dir, agent_name, version)
 
     if prefer_local:
         if not local_path.exists():

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = ROOT / ".env"
 LLM_KEYS = REQUIRED_KEYS
 DEFAULT_SSM_PREFIX = "/a2a/llm"
+FYERS_ENV_KEYS = ("FYERS_APP_ID", "FYERS_ACCESS_TOKEN")
 
 
 def mask_secret(value: str, visible: int = 4) -> str:
@@ -97,6 +98,46 @@ def _load_ssm_parameters() -> str | None:
         return f"aws-ssm://{prefix}"
     except (ClientError, BotoCoreError, ValueError):
         return None
+
+
+def _load_fyers_from_ssm() -> bool:
+    prefix = os.getenv("A2A_FYERS_SSM_PREFIX", os.getenv("A2A_SSM_PARAM_PREFIX", DEFAULT_SSM_PREFIX))
+    region = os.getenv("AWS_REGION", "ap-south-1")
+    missing = [key for key in FYERS_ENV_KEYS if not os.getenv(key)]
+    if not missing:
+        return False
+
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        client = boto3.client("ssm", region_name=region)
+        loaded = 0
+        for key in missing:
+            name = ssm_parameter_name(key, prefix)
+            response = client.get_parameter(Name=name, WithDecryption=True)
+            value = response.get("Parameter", {}).get("Value", "")
+            if value:
+                os.environ[key] = value
+                loaded += 1
+        return loaded > 0
+    except (ClientError, BotoCoreError, ValueError):
+        return False
+
+
+def get_fyers_credentials() -> tuple[str, str]:
+    """Load FYERS_APP_ID and FYERS_ACCESS_TOKEN from .env or SSM."""
+    load_project_env()
+    if any(not os.getenv(key) for key in FYERS_ENV_KEYS):
+        _load_fyers_from_ssm()
+
+    app_id = os.getenv("FYERS_APP_ID", "").strip()
+    access_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+    if not app_id or not access_token:
+        raise ValueError(
+            "FYERS_APP_ID and FYERS_ACCESS_TOKEN must be set in .env or SSM."
+        )
+    return app_id, access_token
 
 
 def load_project_env() -> Literal["local", "ssm", "mixed", "none"]:

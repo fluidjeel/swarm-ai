@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from src.data.base_provider import UntaggedPositionError
 from src.data.fyers_provider import (
+    FyersMarketDataProvider,
     _parse_breadth_from_quotes,
     _parse_history_candles,
     _parse_option_chain_pcr,
@@ -107,7 +109,7 @@ class FyersPositionInferenceTests(unittest.TestCase):
         self.assertTrue(all(pos.strategy_id == "iron_condor" for pos in positions))
         self.assertEqual(len({pos.strategy_id for pos in positions}), 1)
 
-    def test_get_positions_infers_short_strangle_from_2_untagged_legs(self) -> None:
+    def test_get_positions_raises_for_2_untagged_strangle_legs(self) -> None:
         response = {
             "s": "ok",
             "netPositions": [
@@ -129,9 +131,8 @@ class FyersPositionInferenceTests(unittest.TestCase):
                 },
             ],
         }
-        positions = _parse_positions(response)
-        self.assertEqual(len(positions), 2)
-        self.assertTrue(all(pos.strategy == "short_strangle" for pos in positions))
+        with self.assertRaises(UntaggedPositionError):
+            _parse_positions(response)
 
     def test_get_positions_raises_untagged_for_3_legs(self) -> None:
         response = {
@@ -190,6 +191,43 @@ class FyersPositionInferenceTests(unittest.TestCase):
         }
         with self.assertRaises(UntaggedPositionError):
             _parse_positions(response)
+
+
+class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_option_chain_greeks_with_expiry_ts(self) -> None:
+        provider = FyersMarketDataProvider(app_id="test-app", access_token="token")
+        captured_payload: dict[str, str] = {}
+        expiry_ts = 1_810_000_000
+
+        def _optionchain(payload: dict[str, str]) -> dict[str, object]:
+            captured_payload.update(payload)
+            return {
+                "s": "ok",
+                "data": {
+                    "optionsChain": [
+                        {
+                            "symbol": "NSE:NIFTY24JUN25000CE",
+                            "option_type": "CE",
+                            "strike_price": 25000,
+                            "delta": 0.31,
+                            "gamma": 0.01,
+                            "confidence": "high",
+                        }
+                    ]
+                },
+            }
+
+        mock_client = MagicMock()
+        mock_client.optionchain.side_effect = _optionchain
+        with patch.object(provider, "_get_client", return_value=mock_client):
+            greeks = await provider.get_option_chain_greeks(
+                "NSE:NIFTY50-INDEX",
+                expiry_ts,
+            )
+
+        self.assertEqual(captured_payload["timestamp"], str(expiry_ts))
+        self.assertEqual(len(greeks), 1)
+        self.assertEqual(greeks[0].symbol, "NSE:NIFTY24JUN25000CE")
 
 
 if __name__ == "__main__":

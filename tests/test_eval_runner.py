@@ -47,6 +47,12 @@ class PromptLoaderTests(unittest.TestCase):
         text, source = load_prompt("regime_classifier", "v1", prefer_local=True)
         self.assertIn("Regime Classifier", text)
         self.assertTrue(source.startswith("local://"))
+        self.assertIn("archive/regime_classifier_v4.0_deprecated.md", source)
+
+    def test_load_archived_strategy_prompt(self) -> None:
+        text, source = load_prompt("strategy_selector", "v1", prefer_local=True)
+        self.assertIn("Strategy Selector", text)
+        self.assertIn("archive/strategy_selector_v4.0_deprecated.md", source)
 
 
 class SchemaOnlyRunnerTests(unittest.TestCase):

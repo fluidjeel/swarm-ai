@@ -9,23 +9,12 @@ from typing import Any
 
 from src.config.absolute_limits import clamp_to_absolute
 from src.config.risk_config import RiskConfig
-from src.core.context import SESSION_CIRCUIT_BREAKER_PNL, AgentContext, CriticStatus
-
-RANGE_SHORT_VOL_STRATEGIES = frozenset(
-    {
-        "iron_condor",
-        "short_strangle",
-        "short_straddle",
-    }
-)
-
-FUTURES_STRATEGIES = frozenset({"nifty_futures_long", "nifty_futures_short"})
+from src.core.context import SESSION_CIRCUIT_BREAKER_PNL, AgentContext, CriticStatus, StrategyName
 
 VIX_CEILING = 18.0
 EXPIRY_DTE_BLOCK = 1
 BASE_CAPITAL_INR = 600_000.0
 LOT_SCALING_STEP_INR = 400_000.0
-FUTURES_ROUND_TRIP_SLIPPAGE_INR = 150.0
 OPTIONS_ROUND_TRIP_SLIPPAGE_INR = 40.0
 
 
@@ -41,22 +30,11 @@ class GatekeeperRule(StrEnum):
     GAMMA_DTE_FILTER = "gamma_dte_filter"
     CRITIC_BLOCK = "critic_block"
     STALE_QUOTE_BLOCK = "stale_quote_block"
-    UNDEFINED_RISK_BLOCK = "undefined_risk_block"
     MAX_LOSS_DAY_BLOCK = "max_loss_day_block"
     MAX_LOSS_TRADE_BLOCK = "max_loss_trade_block"
     MAX_LOTS_BLOCK = "max_lots_block"
     MARGIN_BLOCK = "margin_block"
     CASH_NO_TRADE = "cash_no_trade"
-
-
-NAKED_SHORT_STRATEGIES = frozenset(
-    {
-        "short_strangle",
-        "short_straddle",
-        "naked_short_call",
-        "naked_short_put",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +58,15 @@ def compute_allowed_lots(
 
 
 def round_trip_slippage(strategy: str) -> float:
-    """HLDD §2.2: ₹150 futures / ₹40 options round-trip."""
-    if strategy.strip().lower() in FUTURES_STRATEGIES:
-        return FUTURES_ROUND_TRIP_SLIPPAGE_INR
+    """HLDD §2.2: ₹40 options round-trip (v4.1 defined-risk spreads only)."""
+    _ = strategy
     return OPTIONS_ROUND_TRIP_SLIPPAGE_INR
+
+
+def _strategy_key(strategy: StrategyName | str) -> str:
+    if isinstance(strategy, StrategyName):
+        return strategy.value
+    return strategy.strip().lower()
 
 
 class RiskGatekeeper:
@@ -115,7 +98,7 @@ class RiskGatekeeper:
     ) -> GatekeeperDecision:
         vix = _read_float(feature_payload, "vix", "VIX")
         dte = _read_int(feature_payload, "dte", "DTE")
-        strategy_key = strategy.strip().lower()
+        strategy_key = _strategy_key(strategy)
         allowed_lots = compute_allowed_lots(
             current_capital,
             base_capital=self.base_capital,
@@ -147,7 +130,7 @@ class RiskGatekeeper:
                 expected_round_trip_cost=expected_cost,
             )
 
-        if strategy_key in RANGE_SHORT_VOL_STRATEGIES and vix > self.vix_ceiling:
+        if strategy_key == StrategyName.IRON_CONDOR.value and vix > self.vix_ceiling:
             return GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
                 reason=f"VIX ceiling breached for short-vol RANGE strategy: {vix:.2f} > {self.vix_ceiling:.2f}",
@@ -156,7 +139,7 @@ class RiskGatekeeper:
                 expected_round_trip_cost=expected_cost,
             )
 
-        if strategy_key in RANGE_SHORT_VOL_STRATEGIES and dte <= self.expiry_dte_block:
+        if strategy_key == StrategyName.IRON_CONDOR.value and dte <= self.expiry_dte_block:
             return GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
                 reason=f"Gamma/DTE filter: DTE {dte} <= {self.expiry_dte_block} for RANGE strategy",
@@ -188,7 +171,7 @@ def evaluate_from_context(
     )
 
     strategy_decision = ctx.strategy_decision
-    if strategy_decision is None or strategy_decision.strategy == "cash_no_trade":
+    if strategy_decision is None or strategy_decision.strategy == StrategyName.CASH_NO_TRADE:
         return ctx.update(
             gatekeeper_decision=GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
@@ -197,7 +180,7 @@ def evaluate_from_context(
             )
         )
 
-    strategy_key = strategy_decision.strategy.strip().lower()
+    strategy_key = strategy_decision.strategy.value
     expected_cost = round_trip_slippage(strategy_key)
 
     critic = ctx.critic_decision
@@ -215,15 +198,7 @@ def evaluate_from_context(
             )
         )
 
-    if strategy_key in NAKED_SHORT_STRATEGIES:
-        return ctx.update(
-            gatekeeper_decision=GatekeeperDecision(
-                verdict=GatekeeperVerdict.REJECT,
-                reason=f"Undefined risk block for naked short strategy: {strategy_key}",
-                rule_id=GatekeeperRule.UNDEFINED_RISK_BLOCK,
-                expected_round_trip_cost=expected_cost,
-            )
-        )
+    # Naked strategies blocked at StrategyDecision validation.
 
     max_day_loss = -clamp_to_absolute("max_loss_per_day_inr", config.max_loss_per_day_inr)
     if ctx.daily_pnl <= max_day_loss:

@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SESSION_CIRCUIT_BREAKER_PNL = -8000.0
 # STALE_QUOTE_POINTS: threshold for |current_underlying - feature_snapshot_price|.
@@ -29,6 +29,26 @@ class RegimeLabel(StrEnum):
     RANGE = "RANGE"
     CHOPPY = "CHOPPY"
     UNCERTAIN = "UNCERTAIN"
+
+
+# v4.1 POLICY (do not extend without architect review):
+#   - Naked options (short_strangle, short_straddle): undefined risk,
+#     require ₹6L+ margin PER LEG. Excluded from intraday.
+#   - Intraday futures: catastrophic loss potential on t3.small
+#     account size (₹6L). Excluded.
+#   - Only defined-risk vertical/iron-condor spreads are permitted.
+#   - cash_no_trade is a deliberate fall-through, not a bug.
+
+
+class StrategyName(StrEnum):
+    """ALLOWED strategies in v4.1. Hard limit; do not extend without
+    revisiting the ₹6L capital fence and the risk-of-ruin math.
+    """
+
+    IRON_CONDOR = "iron_condor"
+    BULL_CALL_SPREAD = "bull_call_spread"
+    BEAR_PUT_SPREAD = "bear_put_spread"
+    CASH_NO_TRADE = "cash_no_trade"
 
 
 class CriticStatus(StrEnum):
@@ -63,8 +83,17 @@ class OpeningRegime(StrictModel):
 class StrategyDecision(StrictModel):
     """Strategy output populated by Agent 2 (Strategy Selector)."""
 
-    strategy: str = Field(..., min_length=1)
+    strategy: StrategyName
     supporting_signals: list[str] = Field(..., min_length=2)
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _coerce_strategy(cls, value: object) -> StrategyName:
+        if isinstance(value, StrategyName):
+            return value
+        if isinstance(value, str):
+            return StrategyName(value.strip().lower())
+        raise TypeError("strategy must be StrategyName or allowed strategy string")
 
 
 class CriticDecision(StrictModel):
@@ -78,7 +107,7 @@ class OpenPosition(StrictModel):
     """Active trade state tracked for Agent 4 (Position Advisor)."""
 
     symbol: str = Field(..., min_length=1)
-    strategy: str = Field(..., min_length=1)
+    strategy: StrategyName
     lots: int = Field(..., ge=1)
     entry_price: float = Field(..., gt=0.0)
     leg_id: str | None = Field(
@@ -93,6 +122,15 @@ class OpenPosition(StrictModel):
         default=None,
         description="All legs when this row is a multi-leg summary position.",
     )
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _coerce_strategy(cls, value: object) -> StrategyName:
+        if isinstance(value, StrategyName):
+            return value
+        if isinstance(value, str):
+            return StrategyName(value.strip().lower())
+        raise TypeError("strategy must be StrategyName or allowed strategy string")
 
 
 class AgentContext(StrictModel):
@@ -121,6 +159,10 @@ class AgentContext(StrictModel):
 
     # Risk & session state
     open_position: OpenPosition | None = None
+    exit_leg_intents: list[Any] | None = Field(
+        default=None,
+        description="Per-leg exit intents from Exit Engine for Phase-4 executor.",
+    )
     feature_snapshot_price: float | None = Field(
         default=None,
         gt=0.0,
