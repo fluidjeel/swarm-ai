@@ -76,6 +76,18 @@ class OpenPosition(StrictModel):
     strategy: str = Field(..., min_length=1)
     lots: int = Field(..., ge=1)
     entry_price: float = Field(..., gt=0.0)
+    leg_id: str | None = Field(
+        default=None,
+        description="Stable leg identifier; symbol for each broker leg.",
+    )
+    strategy_id: str | None = Field(
+        default=None,
+        description="Groups multi-leg legs under one strategy cluster.",
+    )
+    legs: list[OpenPosition] | None = Field(
+        default=None,
+        description="All legs when this row is a multi-leg summary position.",
+    )
 
 
 class AgentContext(StrictModel):

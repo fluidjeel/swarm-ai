@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 from src.core.context import AgentContext, OpenPosition
 from src.data.base_provider import FyersAuthError, MarketDataError, OptionGreeks, Quote
-from src.orchestration.broker_recovery import OrphanLegError, rebuild_from_fyers
+from src.data.fyers_provider import _parse_positions
+from src.orchestration.broker_recovery import OrphanLegError, PartialFillError, rebuild_from_fyers
 from src.orchestration.session_clock import MarketPhase, current_phase, is_trading_day
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
 
@@ -99,6 +100,46 @@ def _ist(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetim
     return datetime(year, month, day, hour, minute, tzinfo=IST)
 
 
+def _iron_condor_response() -> dict:
+    return {
+        "s": "ok",
+        "netPositions": [
+            {
+                "symbol": "NSE:NIFTY24JUN24000PE",
+                "netQty": 50,
+                "avgPrice": 80.0,
+                "option_type": "PE",
+                "strike_price": 24000,
+                "expiry": "24JUN24",
+            },
+            {
+                "symbol": "NSE:NIFTY24JUN24100PE",
+                "netQty": -50,
+                "avgPrice": 120.0,
+                "option_type": "PE",
+                "strike_price": 24100,
+                "expiry": "24JUN24",
+            },
+            {
+                "symbol": "NSE:NIFTY24JUN25000CE",
+                "netQty": -50,
+                "avgPrice": 90.0,
+                "option_type": "CE",
+                "strike_price": 25000,
+                "expiry": "24JUN24",
+            },
+            {
+                "symbol": "NSE:NIFTY24JUN25100CE",
+                "netQty": 50,
+                "avgPrice": 60.0,
+                "option_type": "CE",
+                "strike_price": 25100,
+                "expiry": "24JUN24",
+            },
+        ],
+    }
+
+
 class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_rebuild_sets_open_position_from_broker(self) -> None:
         position = OpenPosition(
@@ -148,6 +189,8 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             strategy="iron_condor",
             lots=1,
             entry_price=100.0,
+            leg_id="NSE:NIFTY-OPT-CE",
+            strategy_id="iron_condor",
         )
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-04")
@@ -163,12 +206,16 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             strategy="nifty_futures_long",
             lots=1,
             entry_price=100.0,
+            leg_id="NSE:NIFTY24JUNFUT",
+            strategy_id="nifty_futures_long",
         )
         second = OpenPosition(
             symbol="NSE:BANKNIFTY24JUNFUT",
             strategy="nifty_futures_long",
             lots=1,
             entry_price=200.0,
+            leg_id="NSE:BANKNIFTY24JUNFUT",
+            strategy_id="nifty_futures_long",
         )
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-05")
@@ -180,8 +227,97 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.open_position, first)
-        self.assertEqual(boot.rows[-1]["outcome"], "multi_position_kept_first")
-        self.assertIn("BANKNIFTY", boot.rows[-1]["detail"])
+        dropped_rows = [row for row in boot.rows if row.get("outcome") == "multi_group_kept_largest"]
+        self.assertEqual(len(dropped_rows), 1)
+        self.assertIn("BANKNIFTY", dropped_rows[0]["detail"])
+        self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
+
+    async def test_rebuild_aggregates_4_legs_iron_condor(self) -> None:
+        parsed = _parse_positions(_iron_condor_response())
+        boot = _RecordingBootLogger()
+        ctx = AgentContext(session_id="recovery-session-07")
+
+        result = await rebuild_from_fyers(_FakeProvider(positions=parsed), ctx, boot_logger=boot)
+
+        self.assertIsNotNone(result.open_position)
+        self.assertEqual(result.open_position.strategy, "iron_condor")
+        self.assertEqual(result.open_position.symbol, "iron_condor_summary")
+        self.assertIsNotNone(result.open_position.legs)
+        self.assertEqual(len(result.open_position.legs), 4)
+        self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
+
+    async def test_rebuild_raises_partial_fill_for_2_iron_condor_legs(self) -> None:
+        legs = _parse_positions(_iron_condor_response())[:2]
+        boot = _RecordingBootLogger()
+        ctx = AgentContext(session_id="recovery-session-08")
+
+        with self.assertRaises(PartialFillError):
+            await rebuild_from_fyers(_FakeProvider(positions=legs), ctx, boot_logger=boot)
+
+        self.assertEqual(boot.rows[-1]["outcome"], "partial_fill_detected")
+
+    async def test_rebuild_aggregates_2_legs_strangle(self) -> None:
+        legs = [
+            OpenPosition(
+                symbol="NSE:NIFTY24JUN25000CE",
+                strategy="short_strangle",
+                lots=1,
+                entry_price=90.0,
+                leg_id="NSE:NIFTY24JUN25000CE",
+                strategy_id="short_strangle",
+            ),
+            OpenPosition(
+                symbol="NSE:NIFTY24JUN24000PE",
+                strategy="short_strangle",
+                lots=1,
+                entry_price=80.0,
+                leg_id="NSE:NIFTY24JUN24000PE",
+                strategy_id="short_strangle",
+            ),
+        ]
+        boot = _RecordingBootLogger()
+        ctx = AgentContext(session_id="recovery-session-09")
+        result = await rebuild_from_fyers(_FakeProvider(positions=legs), ctx, boot_logger=boot)
+
+        self.assertEqual(result.open_position.strategy, "short_strangle")
+        self.assertEqual(len(result.open_position.legs), 2)
+        self.assertEqual(result.open_position.symbol, "short_strangle_summary")
+
+    async def test_rebuild_keeps_largest_group(self) -> None:
+        futures = OpenPosition(
+            symbol="NSE:NIFTY24JUNFUT",
+            strategy="nifty_futures_long",
+            lots=1,
+            entry_price=100.0,
+            leg_id="NSE:NIFTY24JUNFUT",
+            strategy_id="nifty_futures_long",
+        )
+        iron_condor_legs = _parse_positions(_iron_condor_response())
+        boot = _RecordingBootLogger()
+        ctx = AgentContext(session_id="recovery-session-10")
+
+        result = await rebuild_from_fyers(
+            _FakeProvider(positions=[futures, *iron_condor_legs]),
+            ctx,
+            boot_logger=boot,
+        )
+
+        self.assertEqual(result.open_position.strategy, "iron_condor")
+        self.assertEqual(len(result.open_position.legs), 4)
+        dropped_rows = [row for row in boot.rows if row.get("outcome") == "multi_group_kept_largest"]
+        self.assertEqual(len(dropped_rows), 1)
+        self.assertIn("NSE:NIFTY24JUNFUT", dropped_rows[0]["detail"])
+
+    async def test_rebuild_end_to_end_untagged_iron_condor(self) -> None:
+        parsed = _parse_positions(_iron_condor_response())
+        boot = _RecordingBootLogger()
+        ctx = AgentContext(session_id="recovery-session-11")
+
+        result = await rebuild_from_fyers(_FakeProvider(positions=parsed), ctx, boot_logger=boot)
+
+        self.assertTrue(all(leg.strategy_id == "iron_condor" for leg in parsed))
+        self.assertIsNotNone(result.open_position)
+        self.assertEqual(len(result.open_position.legs), 4)
 
 
 class SessionClockTests(unittest.TestCase):
@@ -240,59 +376,18 @@ class BootstrapSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_untagged_4_legs_inferred_as_iron_condor(self) -> None:
-        from src.data.fyers_provider import _parse_positions
-
-        response = {
-            "s": "ok",
-            "netPositions": [
-                {
-                    "symbol": "NSE:NIFTY24JUN24000PE",
-                    "netQty": 50,
-                    "avgPrice": 80.0,
-                    "option_type": "PE",
-                    "strike_price": 24000,
-                    "expiry": "24JUN24",
-                },
-                {
-                    "symbol": "NSE:NIFTY24JUN24100PE",
-                    "netQty": -50,
-                    "avgPrice": 120.0,
-                    "option_type": "PE",
-                    "strike_price": 24100,
-                    "expiry": "24JUN24",
-                },
-                {
-                    "symbol": "NSE:NIFTY24JUN25000CE",
-                    "netQty": -50,
-                    "avgPrice": 90.0,
-                    "option_type": "CE",
-                    "strike_price": 25000,
-                    "expiry": "24JUN24",
-                },
-                {
-                    "symbol": "NSE:NIFTY24JUN25100CE",
-                    "netQty": 50,
-                    "avgPrice": 60.0,
-                    "option_type": "CE",
-                    "strike_price": 25100,
-                    "expiry": "24JUN24",
-                },
-            ],
-        }
-        parsed = _parse_positions(response)
+        parsed = _parse_positions(_iron_condor_response())
         self.assertEqual(len(parsed), 4)
         self.assertTrue(all(pos.strategy == "iron_condor" for pos in parsed))
+        self.assertTrue(all(pos.strategy_id == "iron_condor" for pos in parsed))
 
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-06")
-        with self.assertRaises(OrphanLegError):
-            await rebuild_from_fyers(
-                _FakeProvider(positions=[parsed[0]]),
-                ctx,
-                boot_logger=boot,
-            )
-        self.assertEqual(parsed[0].strategy, "iron_condor")
-        self.assertEqual(boot.rows[-1]["outcome"], "orphan_leg_detected")
+        result = await rebuild_from_fyers(_FakeProvider(positions=parsed), ctx, boot_logger=boot)
+
+        self.assertEqual(len(result.open_position.legs), 4)
+        self.assertEqual(result.open_position.strategy, "iron_condor")
+        self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
 
     async def test_bootstrap_session_calls_recovery(self) -> None:
         position = OpenPosition(

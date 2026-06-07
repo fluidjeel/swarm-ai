@@ -24,11 +24,11 @@ Purge Vector Memory from AgentContext
 
 Removed similar_regimes / SimilarRegimeSnapshot; added feature_snapshot_price + data_degraded.
 
-⬜
+✅
 
 Fyers State Recovery
 
-Force GET /positions on EC2 boot/loop init. Never trust local memory/DynamoDB for has_open_position status.
+GET /positions on boot via bootstrap_session; multi-leg aggregation (Step 2.2) groups legs by strategy_id into summary open_position.legs.
 
 ⬜
 

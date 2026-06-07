@@ -364,6 +364,34 @@ def _active_position_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
     return active
 
 
+def _row_leg_id(row: dict[str, Any]) -> str:
+    symbol = str(row.get("symbol", "")).strip()
+    if not symbol:
+        raise UntaggedPositionError("Position row missing symbol for leg_id.")
+    return symbol
+
+
+def _row_strategy_id(
+    row: dict[str, Any],
+    *,
+    untagged_group_strategies: dict[tuple[str, str], str],
+) -> str:
+    if _row_has_broker_tag(row):
+        return _row_strategy_tag(row)
+
+    symbol = str(row.get("symbol", "")).upper()
+    if "FUT" in symbol:
+        return _infer_strategy_from_legs([row])
+
+    group_key = (_row_underlying_key(row), _row_expiry_key(row))
+    strategy = untagged_group_strategies.get(group_key)
+    if strategy is None:
+        raise UntaggedPositionError(
+            f"No inferred strategy_id for untagged leg {row.get('symbol')} in group {group_key}."
+        )
+    return strategy
+
+
 def _strategy_for_row(
     row: dict[str, Any],
     *,
@@ -426,15 +454,21 @@ def _parse_positions(response: dict[str, Any]) -> list[OpenPosition]:
             lots = 1
 
         symbol = str(row.get("symbol", "")).strip()
+        strategy = _strategy_for_row(
+            row,
+            untagged_group_strategies=untagged_group_strategies,
+        )
         positions.append(
             OpenPosition(
                 symbol=symbol,
-                strategy=_strategy_for_row(
+                strategy=strategy,
+                lots=lots,
+                entry_price=entry_price,
+                leg_id=_row_leg_id(row),
+                strategy_id=_row_strategy_id(
                     row,
                     untagged_group_strategies=untagged_group_strategies,
                 ),
-                lots=lots,
-                entry_price=entry_price,
             )
         )
 

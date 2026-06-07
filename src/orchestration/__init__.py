@@ -1,6 +1,6 @@
 """Session orchestration: AgentContext pipeline (Phase 2 → 3 bridge)."""
 
-from src.orchestration.broker_recovery import OrphanLegError, rebuild_from_fyers
+from src.orchestration.broker_recovery import OrphanLegError, PartialFillError, rebuild_from_fyers
 from src.orchestration.context_adapters import (
     apply_feature_payload,
     feature_payload_from_opening_regime,
@@ -25,6 +25,7 @@ __all__ = [
     "MarketPhase",
     "NullTickLock",
     "OrphanLegError",
+    "PartialFillError",
     "SessionPipeline",
     "SessionPipelineError",
     "SessionTickResult",

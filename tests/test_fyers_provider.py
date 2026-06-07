@@ -104,6 +104,8 @@ class FyersPositionInferenceTests(unittest.TestCase):
         positions = _parse_positions(response)
         self.assertEqual(len(positions), 4)
         self.assertTrue(all(pos.strategy == "iron_condor" for pos in positions))
+        self.assertTrue(all(pos.strategy_id == "iron_condor" for pos in positions))
+        self.assertEqual(len({pos.strategy_id for pos in positions}), 1)
 
     def test_get_positions_infers_short_strangle_from_2_untagged_legs(self) -> None:
         response = {
