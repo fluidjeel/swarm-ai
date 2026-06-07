@@ -7,7 +7,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChainPcr
+from src.core.context import OpenPosition
+from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChainPcr, OptionGreeks, Quote
 from src.features.feature_engine import (
     FeatureEngineError,
     FeatureEngineErrorCode,
@@ -45,6 +46,24 @@ class _FakeProvider:
             {"timestamp": 2, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1},
             {"timestamp": 3, "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1},
         ]
+
+    async def get_positions(self) -> list[OpenPosition]:
+        return []
+
+    async def get_option_chain_greeks(self, symbol: str, expiry_ts: int) -> list[OptionGreeks]:
+        return [
+            OptionGreeks(
+                symbol=f"{symbol}:25000:CE",
+                strike=25000.0,
+                option_type="CE",
+                delta=0.25,
+                gamma=0.01,
+                confidence="high",
+            )
+        ]
+
+    async def get_bid_ask(self, symbol: str) -> Quote:
+        return Quote(symbol=symbol, bid=99.0, ask=101.0, ltp=100.0, spread_pct=0.02)
 
 
 class _FailingVixProvider(_FakeProvider):

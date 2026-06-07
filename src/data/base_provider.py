@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from src.core.context import OpenPosition
 
 
 class OhlcvBar(TypedDict):
@@ -38,8 +41,40 @@ class OptionChainPcr:
     symbol: str
 
 
+@dataclass(frozen=True, slots=True)
+class Quote:
+    """Bid/ask snapshot for a symbol."""
+
+    symbol: str
+    bid: float
+    ask: float
+    ltp: float
+    spread_pct: float
+    underlying_ltp: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OptionGreeks:
+    """Greeks for a single option strike."""
+
+    symbol: str
+    strike: float
+    option_type: str
+    delta: float
+    gamma: float
+    confidence: str
+
+
 class MarketDataError(RuntimeError):
     """Raised when a market data provider returns an invalid or failed response."""
+
+
+class FyersAuthError(MarketDataError):
+    """Raised when Fyers access token is expired or invalid."""
+
+
+class UntaggedPositionError(MarketDataError):
+    """Raised when broker positions lack tags and leg grouping is ambiguous."""
 
 
 class MarketDataTimeoutError(MarketDataError):
@@ -75,3 +110,24 @@ class MarketDataProvider(ABC):
     @abstractmethod
     async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
         """Return Nifty 50 advancers/decliners ratio (v1 breadth proxy)."""
+
+    @abstractmethod
+    async def get_positions(self) -> list[OpenPosition]:
+        """Query broker positions. Return reconstructed OpenPosition list.
+
+        On 5xx/transient errors: raise MarketDataError (fail-closed).
+        On auth expired: raise FyersAuthError.
+        Never return [] silently on error.
+        """
+
+    @abstractmethod
+    async def get_option_chain_greeks(
+        self,
+        symbol: str,
+        expiry_ts: int,
+    ) -> list[OptionGreeks]:
+        """Return greeks with confidence flag; mark illiquid strikes low confidence."""
+
+    @abstractmethod
+    async def get_bid_ask(self, symbol: str) -> Quote:
+        """Return bid, ask, ltp, spread_pct. Raise on missing fields."""

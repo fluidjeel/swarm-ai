@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import unittest
 
+from src.data.base_provider import UntaggedPositionError
 from src.data.fyers_provider import (
     _parse_breadth_from_quotes,
     _parse_history_candles,
     _parse_option_chain_pcr,
+    _parse_positions,
     _sum_option_oi,
 )
 
@@ -58,6 +60,134 @@ class FyersProviderParsingTests(unittest.TestCase):
         self.assertEqual(breadth.advancers, 1)
         self.assertEqual(breadth.decliners, 1)
         self.assertEqual(breadth.unchanged, 1)
+
+
+class FyersPositionInferenceTests(unittest.TestCase):
+    def test_get_positions_infers_iron_condor_from_4_untagged_legs(self) -> None:
+        response = {
+            "s": "ok",
+            "netPositions": [
+                {
+                    "symbol": "NSE:NIFTY24JUN24000PE",
+                    "netQty": 50,
+                    "avgPrice": 80.0,
+                    "option_type": "PE",
+                    "strike_price": 24000,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN24100PE",
+                    "netQty": -50,
+                    "avgPrice": 120.0,
+                    "option_type": "PE",
+                    "strike_price": 24100,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN25000CE",
+                    "netQty": -50,
+                    "avgPrice": 90.0,
+                    "option_type": "CE",
+                    "strike_price": 25000,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN25100CE",
+                    "netQty": 50,
+                    "avgPrice": 60.0,
+                    "option_type": "CE",
+                    "strike_price": 25100,
+                    "expiry": "24JUN24",
+                },
+            ],
+        }
+        positions = _parse_positions(response)
+        self.assertEqual(len(positions), 4)
+        self.assertTrue(all(pos.strategy == "iron_condor" for pos in positions))
+
+    def test_get_positions_infers_short_strangle_from_2_untagged_legs(self) -> None:
+        response = {
+            "s": "ok",
+            "netPositions": [
+                {
+                    "symbol": "NSE:NIFTY24JUN25000CE",
+                    "netQty": -50,
+                    "avgPrice": 90.0,
+                    "option_type": "CE",
+                    "strike_price": 25000,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN24000PE",
+                    "netQty": -50,
+                    "avgPrice": 80.0,
+                    "option_type": "PE",
+                    "strike_price": 24000,
+                    "expiry": "24JUN24",
+                },
+            ],
+        }
+        positions = _parse_positions(response)
+        self.assertEqual(len(positions), 2)
+        self.assertTrue(all(pos.strategy == "short_strangle" for pos in positions))
+
+    def test_get_positions_raises_untagged_for_3_legs(self) -> None:
+        response = {
+            "s": "ok",
+            "netPositions": [
+                {
+                    "symbol": "NSE:NIFTY24JUN25000CE",
+                    "netQty": -50,
+                    "avgPrice": 90.0,
+                    "option_type": "CE",
+                    "strike_price": 25000,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN25100CE",
+                    "netQty": 50,
+                    "avgPrice": 60.0,
+                    "option_type": "CE",
+                    "strike_price": 25100,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:NIFTY24JUN24000PE",
+                    "netQty": -50,
+                    "avgPrice": 80.0,
+                    "option_type": "PE",
+                    "strike_price": 24000,
+                    "expiry": "24JUN24",
+                },
+            ],
+        }
+        with self.assertRaises(UntaggedPositionError):
+            _parse_positions(response)
+
+    def test_get_positions_raises_untagged_for_mixed_underlyings(self) -> None:
+        response = {
+            "s": "ok",
+            "netPositions": [
+                {
+                    "symbol": "NSE:NIFTY24JUN25000CE",
+                    "netQty": -50,
+                    "avgPrice": 90.0,
+                    "option_type": "CE",
+                    "strike_price": 25000,
+                    "expiry": "24JUN24",
+                },
+                {
+                    "symbol": "NSE:BANKNIFTY24JUN45000CE",
+                    "netQty": -25,
+                    "avgPrice": 120.0,
+                    "option_type": "CE",
+                    "strike_price": 45000,
+                    "expiry": "24JUN24",
+                },
+            ],
+        }
+        with self.assertRaises(UntaggedPositionError):
+            _parse_positions(response)
 
 
 if __name__ == "__main__":

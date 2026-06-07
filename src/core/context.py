@@ -12,10 +12,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SESSION_CIRCUIT_BREAKER_PNL = -8000.0
-MAX_SIMILAR_REGIMES = 3
+STALE_QUOTE_POINTS = 10.0
 
 
 class RegimeLabel(StrEnum):
@@ -55,15 +55,6 @@ class OpeningRegime(StrictModel):
     captured_at_iso: str | None = None
 
 
-class SimilarRegimeSnapshot(StrictModel):
-    """Historical precedent returned by the Vector Store for Agent 2."""
-
-    session_id: str = Field(..., min_length=1)
-    regime_decision: RegimeLabel
-    win_rate: float = Field(..., ge=0.0, le=1.0)
-    snapshot: dict[str, Any] = Field(default_factory=dict)
-
-
 class StrategyDecision(StrictModel):
     """Strategy output populated by Agent 2 (Strategy Selector)."""
 
@@ -98,28 +89,22 @@ class AgentContext(StrictModel):
     overnight_context: OvernightContext = Field(default_factory=OvernightContext)
     opening_regime: OpeningRegime = Field(default_factory=OpeningRegime)
 
-    # Dynamic, accumulated per routing event
+    # Dynamic, accumulated per routing event (pure Python intraday — v4.1)
     regime_decision: RegimeLabel | None = None
-    similar_regimes: list[SimilarRegimeSnapshot] = Field(default_factory=list)
     strategy_decision: StrategyDecision | None = None
     critic_decision: CriticDecision | None = None
 
-    # Session risk state
+    # Risk & session state
     open_position: OpenPosition | None = None
+    feature_snapshot_price: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="NIFTY LTP at feature capture; used for stale-quote aborts.",
+    )
+    data_degraded: bool = False
     daily_pnl: float = 0.0
     circuit_status: bool = False
     dte: int = Field(default=0, ge=0, le=45)
-
-    @field_validator("similar_regimes")
-    @classmethod
-    def _limit_similar_regimes(
-        cls, value: list[SimilarRegimeSnapshot]
-    ) -> list[SimilarRegimeSnapshot]:
-        if len(value) > MAX_SIMILAR_REGIMES:
-            raise ValueError(
-                f"Vector store may return at most {MAX_SIMILAR_REGIMES} similar regimes"
-            )
-        return value
 
     @model_validator(mode="after")
     def _validate_circuit_breaker(self) -> AgentContext:

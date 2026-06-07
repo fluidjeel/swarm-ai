@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from src.data.base_provider import BreadthSnapshot, OptionChainPcr
+from src.core.context import OpenPosition
+from src.data.base_provider import BreadthSnapshot, OptionChainPcr, OptionGreeks, Quote
 from src.features.regime_metrics import _derive_vix_trend, compute_regime_metrics
 
 
@@ -36,6 +37,24 @@ class _FakeProvider:
 
     async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
         return BreadthSnapshot(ad_ratio=1.0, advancers=25, decliners=25, unchanged=0, sample_size=50)
+
+    async def get_positions(self) -> list[OpenPosition]:
+        return []
+
+    async def get_option_chain_greeks(self, symbol: str, expiry_ts: int) -> list[OptionGreeks]:
+        return [
+            OptionGreeks(
+                symbol=f"{symbol}:25000:CE",
+                strike=25000.0,
+                option_type="CE",
+                delta=0.25,
+                gamma=0.01,
+                confidence="high",
+            )
+        ]
+
+    async def get_bid_ask(self, symbol: str) -> Quote:
+        return Quote(symbol=symbol, bid=99.0, ask=101.0, ltp=100.0, spread_pct=0.02)
 
 
 class RegimeMetricsTests(unittest.IsolatedAsyncioTestCase):

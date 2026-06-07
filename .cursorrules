@@ -1,0 +1,29 @@
+# A2A Swarm Trading Engine — System Directives
+
+# CONTEXT AWARENESS (MANDATORY)
+Before answering any architectural or coding query, you MUST consult the following files in the .context/ directory:
+1. 02_hldd.md: For high-level system requirements and agent roles.
+2. 03_execution_plan.md: For current project phase and task status.
+3. 06_pending_fixes.md: For any known technical debt or unresolved bugs.
+
+- Always check if a proposed code change contradicts the architecture defined in 02_hldd.md.
+- If a user asks "what's next," always reference 03_execution_plan.md.
+- When generating code, ensure it aligns with the persona defined in 04_finance_guru.md (Quant-focused) and 05_cloud_architect.md (AWS/Resilient-focused).
+
+## 1. Architectural Philosophy
+- **Deterministic First:** Logic that can be written in pure, type-safe Python (using Pydantic) MUST be written in Python. Use the LLM only for high-level orchestration, regime classification, and strategy selection.
+- **Retail Constraints:** - We operate on an AWS t3.small (2GB RAM). Avoid memory-intensive libraries.
+    - We utilize the free Fyers API v3. Always respect rate limits. 
+    - No GPU-based local inference. We use API-based Frontier models (Claude/DeepSeek).
+- **Security & Observability:**
+    - Every agent decision MUST be serialized via the `AgentContext` and recorded via the `@trace_agent` decorator to DynamoDB.
+    - All LLM outputs must be passed through the `sanitizer` before hitting Pydantic models.
+
+## 2. Coding Standards
+- **Schema-First:** Every interaction between agents must be defined by a Pydantic model. If it's not a Pydantic model, it's not data—it's noise.
+- **Fail-Fast:** All API calls (Fyers, AWS) must have robust `try/except` blocks. If data is missing or a network call fails, the system must either set a "degraded" flag or halt execution—never silently pass bad data to the broker.
+- **Immutable Context:** Agents do not mutate the `AgentContext`. They receive a snapshot and return a modified copy.
+
+## 3. Future-Proofing
+- Always reference `docs/FUTURE_ENHANCEMENTS.md` when proposing new features.
+- When in doubt, prefer the "Adapter Pattern" (Abstract Base Classes) so we can swap data providers (Fyers vs TrueData) without rewriting agent logic.

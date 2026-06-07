@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
+from src.core.context import OpenPosition
 from src.data.base_provider import (
     BreadthSnapshot,
+    FyersAuthError,
     MarketDataError,
     MarketDataProvider,
     MarketDataTimeoutError,
     OhlcvBar,
     OptionChainPcr,
+    OptionGreeks,
+    Quote,
+    UntaggedPositionError,
 )
 from src.data.nifty50_symbols import load_nifty50_symbols
 
@@ -43,6 +49,10 @@ def _assert_fyers_ok(response: dict[str, Any], *, context: str) -> dict[str, Any
     if response.get("s") != "ok":
         code = response.get("code", "n/a")
         message = response.get("message", "unknown error")
+        if code in (-8, -9, 401, 403, "401", "403"):
+            raise FyersAuthError(f"{context} auth failed (code={code}): {message}")
+        if isinstance(code, int) and code >= 500:
+            raise MarketDataError(f"{context} broker unavailable (code={code}): {message}")
         raise MarketDataError(f"{context} failed (code={code}): {message}")
     return response
 
@@ -226,6 +236,335 @@ def _parse_option_chain_pcr(
     )
 
 
+_OPTION_SUFFIX = re.compile(r"(\d+(?:\.\d+)?)(CE|PE)$", re.IGNORECASE)
+
+
+def _row_has_broker_tag(row: dict[str, Any]) -> bool:
+    for key in ("strategy", "tag", "productType"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _row_strategy_tag(row: dict[str, Any]) -> str:
+    for key in ("strategy", "tag", "productType"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    raise UntaggedPositionError(f"Position row missing broker tag: {row.get('symbol')}")
+
+
+def _row_underlying_key(row: dict[str, Any]) -> str:
+    underlying = row.get("underlying") or row.get("underlying_symbol")
+    if underlying not in (None, ""):
+        return str(underlying).strip().upper()
+    symbol = str(row.get("symbol", "")).strip().upper()
+    body = symbol.split(":")[-1] if ":" in symbol else symbol
+    if "FUT" in body:
+        match = re.match(r"^([A-Z]+)", body)
+        return match.group(1) if match else body
+    match = re.match(r"^([A-Z]+)", body)
+    return match.group(1) if match else body
+
+
+def _row_expiry_key(row: dict[str, Any]) -> str:
+    for key in ("expiry", "expiry_timestamp", "expiryDate"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    symbol = str(row.get("symbol", "")).strip().upper()
+    body = symbol.split(":")[-1] if ":" in symbol else symbol
+    match = re.match(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})", body)
+    if match:
+        return match.group(1)
+    return body
+
+
+def _row_option_type_and_strike(row: dict[str, Any]) -> tuple[str, float]:
+    option_type = str(row.get("option_type", "")).upper()
+    strike_raw = row.get("strike", row.get("strike_price"))
+    if option_type in {"CE", "PE"} and strike_raw is not None:
+        return option_type, float(strike_raw)
+
+    symbol = str(row.get("symbol", "")).strip().upper()
+    body = symbol.split(":")[-1] if ":" in symbol else symbol
+    match = _OPTION_SUFFIX.search(body)
+    if match:
+        return match.group(2).upper(), float(match.group(1))
+
+    raise UntaggedPositionError(f"Cannot parse option leg from row: {row.get('symbol')}")
+
+
+def _infer_strategy_from_legs(rows: list[dict[str, Any]]) -> str:
+    """Infer strategy from untagged broker legs grouped by underlying + expiry."""
+    if not rows:
+        raise UntaggedPositionError("No position rows to infer strategy from.")
+
+    if any("FUT" in str(row.get("symbol", "")).upper() for row in rows):
+        if len(rows) != 1:
+            raise UntaggedPositionError("Multiple untagged futures legs cannot be inferred.")
+        side = rows[0].get("side")
+        if side == -1:
+            return "nifty_futures_short"
+        return "nifty_futures_long"
+
+    ce_strikes: list[float] = []
+    pe_strikes: list[float] = []
+    for row in rows:
+        option_type, strike = _row_option_type_and_strike(row)
+        if option_type == "CE":
+            ce_strikes.append(strike)
+        else:
+            pe_strikes.append(strike)
+
+    if len(ce_strikes) == 1 and len(pe_strikes) == 1:
+        if ce_strikes[0] == pe_strikes[0]:
+            return "short_straddle"
+        return "short_strangle"
+
+    if len(ce_strikes) == 2 and len(pe_strikes) == 2:
+        ce_sorted = sorted(ce_strikes)
+        pe_sorted = sorted(pe_strikes)
+        if (
+            ce_sorted[0] < ce_sorted[1]
+            and pe_sorted[0] < pe_sorted[1]
+            and pe_sorted[1] < ce_sorted[0]
+        ):
+            return "iron_condor"
+        raise UntaggedPositionError(
+            f"Ambiguous 2CE+2PE leg pattern: CE={ce_strikes}, PE={pe_strikes}"
+        )
+
+    raise UntaggedPositionError(
+        f"Cannot infer strategy from {len(ce_strikes)} CE and {len(pe_strikes)} PE legs."
+    )
+
+
+def _active_position_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in ("netPositions", "overall", "positionBook"):
+        bucket = response.get(key)
+        if isinstance(bucket, list):
+            rows.extend(item for item in bucket if isinstance(item, dict))
+
+    active: list[dict[str, Any]] = []
+    for row in rows:
+        qty_raw = row.get("netQty", row.get("qty", 0))
+        try:
+            qty = abs(int(qty_raw))
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        symbol = str(row.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        active.append(row)
+    return active
+
+
+def _strategy_for_row(
+    row: dict[str, Any],
+    *,
+    untagged_group_strategies: dict[tuple[str, str], str],
+) -> str:
+    if _row_has_broker_tag(row):
+        return _row_strategy_tag(row)
+
+    symbol = str(row.get("symbol", "")).upper()
+    if "FUT" in symbol:
+        return _infer_strategy_from_legs([row])
+
+    group_key = (_row_underlying_key(row), _row_expiry_key(row))
+    strategy = untagged_group_strategies.get(group_key)
+    if strategy is None:
+        raise UntaggedPositionError(
+            f"No inferred strategy for untagged leg {row.get('symbol')} in group {group_key}."
+        )
+    return strategy
+
+
+def _parse_positions(response: dict[str, Any]) -> list[OpenPosition]:
+    active_rows = _active_position_rows(response)
+
+    untagged_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in active_rows:
+        if _row_has_broker_tag(row):
+            continue
+        symbol = str(row.get("symbol", "")).upper()
+        if "FUT" in symbol:
+            continue
+        group_key = (_row_underlying_key(row), _row_expiry_key(row))
+        untagged_groups.setdefault(group_key, []).append(row)
+
+    if len(untagged_groups) > 1:
+        underlyings = {key[0] for key in untagged_groups}
+        if len(underlyings) > 1:
+            raise UntaggedPositionError(
+                f"Mixed underlyings in untagged positions: {sorted(underlyings)}"
+            )
+
+    untagged_group_strategies: dict[tuple[str, str], str] = {}
+    for group_key, group_rows in untagged_groups.items():
+        untagged_group_strategies[group_key] = _infer_strategy_from_legs(group_rows)
+
+    positions: list[OpenPosition] = []
+    for row in active_rows:
+        avg_price_raw = row.get("avgPrice", row.get("netAvg", row.get("buyAvg", 0)))
+        try:
+            entry_price = float(avg_price_raw)
+        except (TypeError, ValueError):
+            continue
+        if entry_price <= 0:
+            continue
+
+        lots_raw = row.get("lotSize", row.get("lots", 1))
+        try:
+            lots = max(int(lots_raw), 1)
+        except (TypeError, ValueError):
+            lots = 1
+
+        symbol = str(row.get("symbol", "")).strip()
+        positions.append(
+            OpenPosition(
+                symbol=symbol,
+                strategy=_strategy_for_row(
+                    row,
+                    untagged_group_strategies=untagged_group_strategies,
+                ),
+                lots=lots,
+                entry_price=entry_price,
+            )
+        )
+
+    return positions
+
+
+def _parse_bid_ask(response: dict[str, Any], symbol: str) -> Quote:
+    quotes = response.get("d")
+    if not isinstance(quotes, list) or not quotes:
+        raise MarketDataError(f"Fyers quotes response empty for {symbol}.")
+
+    for item in quotes:
+        if not isinstance(item, dict):
+            continue
+        item_symbol = item.get("n") or item.get("symbol")
+        if item_symbol and item_symbol != symbol:
+            continue
+        values = item.get("v")
+        if not isinstance(values, dict):
+            continue
+
+        bid = values.get("bid")
+        ask = values.get("ask")
+        ltp = None
+        for key in ("lp", "last_price", "close"):
+            if key in values and values[key] is not None:
+                ltp = float(values[key])
+                break
+
+        if bid is None or ask is None or ltp is None:
+            raise MarketDataError(f"Fyers quote missing bid/ask/ltp for {symbol}.")
+
+        bid_f = float(bid)
+        ask_f = float(ask)
+        if bid_f <= 0 or ask_f <= 0 or ltp <= 0:
+            raise MarketDataError(f"Fyers quote has non-positive prices for {symbol}.")
+
+        spread_pct = (ask_f - bid_f) / ltp
+        underlying = values.get("underlying_ltp") or values.get("underlying")
+        underlying_ltp = float(underlying) if underlying is not None else None
+
+        return Quote(
+            symbol=symbol,
+            bid=bid_f,
+            ask=ask_f,
+            ltp=ltp,
+            spread_pct=spread_pct,
+            underlying_ltp=underlying_ltp,
+        )
+
+    raise MarketDataError(f"Could not parse bid/ask for {symbol} from Fyers quotes.")
+
+
+def _parse_option_chain_greeks(
+    response: dict[str, Any],
+    *,
+    symbol: str,
+    expiry_ts: int,
+) -> list[OptionGreeks]:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise MarketDataError("Fyers option chain response missing 'data' object.")
+
+    chain = data.get("optionsChain")
+    if not isinstance(chain, list) or not chain:
+        raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
+
+    greeks: list[OptionGreeks] = []
+    for row in chain:
+        if not isinstance(row, dict):
+            continue
+
+        option_type = str(row.get("option_type", "")).upper()
+        if option_type not in {"CE", "PE"}:
+            continue
+
+        strike_raw = row.get("strike_price", row.get("strike"))
+        delta_raw = row.get("delta")
+        gamma_raw = row.get("gamma")
+        if strike_raw is None or delta_raw is None or gamma_raw is None:
+            continue
+
+        try:
+            strike = float(strike_raw)
+            delta = float(delta_raw)
+            gamma = float(gamma_raw)
+        except (TypeError, ValueError):
+            continue
+
+        oi_raw = row.get("oi", 0)
+        try:
+            oi = int(oi_raw)
+        except (TypeError, ValueError):
+            oi = 0
+
+        bid = row.get("bid")
+        ask = row.get("ask")
+        confidence = "high"
+        if oi < 100:
+            confidence = "low"
+        elif bid is not None and ask is not None:
+            try:
+                bid_f = float(bid)
+                ask_f = float(ask)
+                ltp_raw = row.get("ltp", row.get("last_price"))
+                ltp_f = float(ltp_raw) if ltp_raw is not None else (bid_f + ask_f) / 2
+                if ltp_f > 0 and (ask_f - bid_f) / ltp_f > 0.10:
+                    confidence = "low"
+            except (TypeError, ValueError):
+                confidence = "low"
+
+        option_symbol = str(row.get("symbol", f"{symbol}:{strike}:{option_type}"))
+        greeks.append(
+            OptionGreeks(
+                symbol=option_symbol,
+                strike=strike,
+                option_type=option_type,
+                delta=delta,
+                gamma=gamma,
+                confidence=confidence,
+            )
+        )
+
+    if not greeks:
+        raise MarketDataError(
+            f"Fyers option chain returned no greeks for {symbol} expiry {expiry_ts}."
+        )
+    return greeks
+
+
 class FyersMarketDataProvider(MarketDataProvider):
     """Fetches market data via the official fyers-apiv3 SDK."""
 
@@ -377,3 +716,48 @@ class FyersMarketDataProvider(MarketDataProvider):
             )
 
         return await self._call_with_timeout(_fetch, context="get_nifty50_ad_ratio")
+
+    async def get_positions(self) -> list[OpenPosition]:
+        def _fetch() -> list[OpenPosition]:
+            client = self._get_client()
+            response = _assert_fyers_ok(client.positions(), context="positions")
+            return _parse_positions(response)
+
+        return await self._call_with_timeout(_fetch, context="get_positions")
+
+    async def get_option_chain_greeks(
+        self,
+        symbol: str,
+        expiry_ts: int,
+    ) -> list[OptionGreeks]:
+        payload = {
+            "symbol": symbol,
+            "strikecount": 50,
+            "timestamp": str(expiry_ts),
+        }
+
+        def _fetch() -> list[OptionGreeks]:
+            client = self._get_client()
+            response = _assert_fyers_ok(
+                client.optionchain(payload),
+                context=f"optionchain_greeks({symbol})",
+            )
+            return _parse_option_chain_greeks(response, symbol=symbol, expiry_ts=expiry_ts)
+
+        return await self._call_with_timeout(
+            _fetch,
+            context=f"get_option_chain_greeks({symbol})",
+        )
+
+    async def get_bid_ask(self, symbol: str) -> Quote:
+        payload = {"symbols": symbol}
+
+        def _fetch() -> Quote:
+            client = self._get_client()
+            response = _assert_fyers_ok(
+                client.quotes(payload),
+                context=f"quotes({symbol})",
+            )
+            return _parse_bid_ask(response, symbol)
+
+        return await self._call_with_timeout(_fetch, context=f"get_bid_ask({symbol})")
