@@ -14,6 +14,7 @@ from src.core.context import (
     OpenPosition,
 )
 from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChainPcr, OptionGreeks, Quote
+from src.risk.gatekeeper import GatekeeperVerdict
 from src.features.feature_engine import FeatureEngineErrorCode
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
 from src.orchestration.session_clock import IST
@@ -80,7 +81,14 @@ class _FakeProvider:
         ]
 
     async def get_bid_ask(self, symbol: str) -> Quote:
-        return Quote(symbol=symbol, bid=99.0, ask=101.0, ltp=100.0, spread_pct=0.02)
+        return Quote(
+            symbol=symbol,
+            bid=101.0,
+            ask=103.0,
+            ltp=102.0,
+            spread_pct=0.02,
+            underlying_ltp=102.0,
+        )
 
 
 class _FailingVixProvider(_FakeProvider):
@@ -331,6 +339,49 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         result = await pipeline.run_tick(ctx)
         self.assertTrue(result.ctx.baseline_initialized)
         self.assertEqual(result.ctx.feature_snapshot_price, 102.0)
+
+    async def test_run_tick_entry_chain_populates_agent_decisions(self) -> None:
+        class _EntryChainProvider(_FakeProvider):
+            async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
+                return BreadthSnapshot(
+                    ad_ratio=1.05,
+                    advancers=28,
+                    decliners=27,
+                    unchanged=5,
+                    sample_size=50,
+                )
+
+            async def get_index_ohlcv(self, symbol: str, *, resolution: str = "5", lookback_bars: int = 50):
+                flat_bar = {
+                    "timestamp": 1,
+                    "open": 102.0,
+                    "high": 102.0,
+                    "low": 102.0,
+                    "close": 102.0,
+                    "volume": 0,
+                }
+                if "VIX" in symbol.upper():
+                    return [
+                        {**flat_bar, "timestamp": 1, "close": 14.0},
+                        {**flat_bar, "timestamp": 2, "close": 14.1},
+                        {**flat_bar, "timestamp": 3, "close": 14.2},
+                    ]
+                return [
+                    {**flat_bar, "timestamp": 1},
+                    {**flat_bar, "timestamp": 2},
+                    {**flat_bar, "timestamp": 3},
+                ]
+
+        pipeline = SessionPipeline(_EntryChainProvider(), tick_lock=NullTickLock())
+        ctx = AgentContext(session_id="pipeline-entry-chain-01")
+        result = await pipeline.run_tick(ctx)
+
+        self.assertIsNotNone(result.ctx.regime_decision)
+        self.assertIsNotNone(result.ctx.strategy_decision)
+        self.assertEqual(result.ctx.strategy_decision.strategy, "iron_condor")
+        self.assertIsNotNone(result.ctx.critic_decision)
+        self.assertIsNotNone(result.ctx.gatekeeper_decision)
+        self.assertEqual(result.ctx.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
 
     async def test_run_tick_initializes_baseline_when_not_set(self) -> None:
         pipeline = SessionPipeline(_FakeProvider(), tick_lock=NullTickLock())

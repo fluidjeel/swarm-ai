@@ -7,8 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from src.core.context import AgentContext
+from src.agents.pre_trade_critic import validate_pre_trade
+from src.agents.regime_classifier import classify_regime
+from src.agents.strategy_selector import select_strategy
+from src.agents.symbol_resolver import expiry_ts_for_context, quote_symbol_for_strategy
+from src.config.risk_config import RiskConfig, load_risk_config
+from src.core.context import AgentContext, CriticDecision, CriticStatus, RegimeLabel
 from src.data.base_provider import FyersAuthError, MarketDataError, MarketDataProvider, OhlcvBar
+from src.risk.gatekeeper import evaluate_from_context
 from src.features.feature_engine import (
     FeatureEngineError,
     FeatureEngineErrorCode,
@@ -78,9 +84,11 @@ class SessionPipeline:
         tick_lock: TickLock | None = None,
         enforce_tick_lock: bool = True,
         boot_logger: BootLogger | None = None,
+        risk_config: RiskConfig | None = None,
     ) -> None:
         self._provider = provider
         self._exit_engine = exit_engine or ExitEngine()
+        self._risk_config = risk_config or load_risk_config()
         self._request_timeout_sec = request_timeout_sec
         self._pcr_history_path = pcr_history_path
         self._nifty_symbol = nifty_symbol
@@ -209,6 +217,9 @@ class SessionPipeline:
             if ctx.is_halted and not ctx.has_open_position:
                 return SessionTickResult(ctx=ctx)
 
+            if not ctx.has_open_position and not ctx.is_halted:
+                ctx = await self._run_entry_chain(ctx)
+
             if not ctx.has_open_position:
                 return SessionTickResult(ctx=ctx)
 
@@ -227,6 +238,41 @@ class SessionPipeline:
             return SessionTickResult(ctx=ctx, exit_decision=exit_decision)
         finally:
             self._tick_lock.release()
+
+    async def _run_entry_chain(self, ctx: AgentContext) -> AgentContext:
+        ctx = classify_regime(ctx, config=self._risk_config)
+        ctx = select_strategy(ctx)
+        strategy = ctx.strategy_decision.strategy if ctx.strategy_decision else "cash_no_trade"
+
+        if strategy != "cash_no_trade" and ctx.regime_decision != RegimeLabel.UNCERTAIN:
+            symbol = quote_symbol_for_strategy(ctx)
+            try:
+                quote = await self._provider.get_bid_ask(symbol)
+                greeks_list = await self._provider.get_option_chain_greeks(
+                    symbol,
+                    expiry_ts_for_context(ctx),
+                )
+                greek = greeks_list[0]
+                live_ltp = quote.underlying_ltp if quote.underlying_ltp is not None else quote.ltp
+                ctx = validate_pre_trade(
+                    ctx,
+                    live_underlying_ltp=live_ltp,
+                    bid_ask_spread_pct=quote.spread_pct,
+                    greeks_confidence=greek.confidence,
+                    greeks_delta=greek.delta,
+                    greeks_gamma=greek.gamma,
+                    config=self._risk_config,
+                )
+            except (MarketDataError, FyersAuthError) as exc:
+                ctx = ctx.update(
+                    critic_decision=CriticDecision(
+                        status=CriticStatus.REJECT,
+                        reason=f"broker_error:{type(exc).__name__}",
+                    )
+                )
+            ctx = evaluate_from_context(ctx, config=self._risk_config)
+
+        return ctx
 
     async def _refresh_features(self, ctx: AgentContext) -> AgentContext:
         try:

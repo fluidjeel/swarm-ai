@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import unittest
 
+from src.config.risk_config import RiskConfig
+from src.core.context import AgentContext, CriticDecision, CriticStatus, OpeningRegime, StrategyDecision
 from src.risk.gatekeeper import (
     GatekeeperRule,
     GatekeeperVerdict,
     RiskGatekeeper,
     compute_allowed_lots,
+    evaluate_from_context,
     round_trip_slippage,
 )
 
@@ -176,6 +179,61 @@ class RiskGatekeeperTests(unittest.TestCase):
 
     def test_options_slippage_cost(self) -> None:
         self.assertEqual(round_trip_slippage("bull_call_spread"), 40.0)
+
+
+class EvaluateFromContextTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = RiskConfig()
+        self.base_ctx = AgentContext(
+            session_id="gatekeeper-ctx-session",
+            opening_regime=OpeningRegime(vix=15.0, nifty_ad_ratio=1.1),
+            dte=7,
+            strategy_decision=StrategyDecision(
+                strategy="iron_condor",
+                supporting_signals=["ad_ratio=1.10", "vix=15.00"],
+            ),
+            critic_decision=CriticDecision(
+                status=CriticStatus.APPROVE,
+                reason="math_checks_passed",
+            ),
+        )
+
+    def test_approves_when_critic_passes(self) -> None:
+        result = evaluate_from_context(self.base_ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
+
+    def test_rejects_on_critic_block(self) -> None:
+        ctx = self.base_ctx.update(
+            critic_decision=CriticDecision(status=CriticStatus.REJECT, reason="spread_too_wide")
+        )
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.CRITIC_BLOCK)
+
+    def test_stale_quote_block_rule(self) -> None:
+        ctx = self.base_ctx.update(
+            critic_decision=CriticDecision(status=CriticStatus.REJECT, reason="stale_quote_abort")
+        )
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.STALE_QUOTE_BLOCK)
+
+    def test_max_loss_day_block(self) -> None:
+        ctx = self.base_ctx.update(daily_pnl=-8001.0, circuit_status=True)
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.MAX_LOSS_DAY_BLOCK)
+
+    def test_max_lots_block(self) -> None:
+        result = evaluate_from_context(self.base_ctx, config=self.config, requested_lots=10)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.MAX_LOTS_BLOCK)
+
+    def test_cash_no_trade_rejects(self) -> None:
+        ctx = self.base_ctx.update(
+            strategy_decision=StrategyDecision(
+                strategy="cash_no_trade",
+                supporting_signals=["no_trade", "choppy"],
+            )
+        )
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.CASH_NO_TRADE)
 
 
 if __name__ == "__main__":

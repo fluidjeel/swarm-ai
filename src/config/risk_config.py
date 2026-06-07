@@ -1,0 +1,36 @@
+"""Runtime risk thresholds for deterministic agents and gatekeeper."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.core.context import STALE_QUOTE_POINTS
+
+
+class RiskConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    vix_choppy_threshold: float = Field(default=18.0, gt=0.0)
+    ad_trend_up_threshold: float = Field(default=1.5, gt=0.0)
+    ad_trend_down_threshold: float = Field(default=0.7, gt=0.0)
+    pcr_bull_threshold: float = Field(default=0.02)
+    pcr_bear_threshold: float = Field(default=-0.02)
+    range_divergence_band: float = Field(default=0.10, ge=0.0)
+    stale_quote_points: float = Field(default=STALE_QUOTE_POINTS, gt=0.0)
+    max_spread_pct: float = Field(default=0.05, gt=0.0)
+    max_gamma: float = Field(default=0.05, gt=0.0)
+    max_lots_per_trade: int = Field(default=4, ge=1)
+    max_loss_per_trade_inr: float = Field(default=4000.0, gt=0.0)
+    max_loss_per_day_inr: float = Field(default=8000.0, gt=0.0)
+
+
+def load_risk_config(path: Path | None = None) -> RiskConfig:
+    if path is None:
+        path = Path("config/risk_config.json")
+    if not path.exists():
+        return RiskConfig()
+    with path.open(encoding="utf-8") as handle:
+        return RiskConfig(**json.load(handle))

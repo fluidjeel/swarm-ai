@@ -1,0 +1,14 @@
+{
+  "vix_choppy_threshold": 18.0,
+  "ad_trend_up_threshold": 1.5,
+  "ad_trend_down_threshold": 0.7,
+  "pcr_bull_threshold": 0.02,
+  "pcr_bear_threshold": -0.02,
+  "range_divergence_band": 0.10,
+  "stale_quote_points": 10.0,
+  "max_spread_pct": 0.05,
+  "max_gamma": 0.05,
+  "max_lots_per_trade": 4,
+  "max_loss_per_trade_inr": 4000.0,
+  "max_loss_per_day_inr": 8000.0
+}

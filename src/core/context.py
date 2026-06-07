@@ -15,6 +15,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SESSION_CIRCUIT_BREAKER_PNL = -8000.0
+# STALE_QUOTE_POINTS: threshold for |current_underlying - feature_snapshot_price|.
+# Units: NIFTY index points (NOT option premium points).
+# Rationale: index is the upstream source for option chain refresh; if index moves
+# > 10 pts between feature capture and Agent 3, the option chain snapshot is stale.
+# Future: option-level stale check uses stale_quote_pct_option in risk_config.json.
 STALE_QUOTE_POINTS = 10.0
 
 
@@ -95,6 +100,13 @@ class AgentContext(StrictModel):
     Canonical session state passed linearly through the swarm and deterministic engines.
     """
 
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+        validate_assignment=True,
+        arbitrary_types_allowed=True,
+    )
+
     session_id: str = Field(..., min_length=8, max_length=128)
 
     # Static per session
@@ -105,6 +117,7 @@ class AgentContext(StrictModel):
     regime_decision: RegimeLabel | None = None
     strategy_decision: StrategyDecision | None = None
     critic_decision: CriticDecision | None = None
+    gatekeeper_decision: Any = None
 
     # Risk & session state
     open_position: OpenPosition | None = None

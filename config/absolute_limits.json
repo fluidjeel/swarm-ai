@@ -1,0 +1,9 @@
+{
+  "note": "Documentation mirror of src/config/absolute_limits.py — runtime source of truth is Python.",
+  "stale_quote_points": { "lower": 1.0, "upper": 50.0 },
+  "max_spread_pct": { "lower": 0.005, "upper": 0.20 },
+  "max_gamma": { "lower": 0.001, "upper": 0.20 },
+  "vix_choppy_threshold": { "lower": 10.0, "upper": 35.0 },
+  "pcr_bull_threshold": { "lower": -0.50, "upper": 0.50 },
+  "ad_trend_up_threshold": { "lower": 0.5, "upper": 3.0 }
+}

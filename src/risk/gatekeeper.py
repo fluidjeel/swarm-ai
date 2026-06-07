@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from src.core.context import SESSION_CIRCUIT_BREAKER_PNL
+from src.config.absolute_limits import clamp_to_absolute
+from src.config.risk_config import RiskConfig
+from src.core.context import SESSION_CIRCUIT_BREAKER_PNL, AgentContext, CriticStatus
 
 RANGE_SHORT_VOL_STRATEGIES = frozenset(
     {
@@ -37,6 +39,24 @@ class GatekeeperRule(StrEnum):
     LOT_SCALING = "lot_scaling"
     VIX_CEILING = "vix_ceiling"
     GAMMA_DTE_FILTER = "gamma_dte_filter"
+    CRITIC_BLOCK = "critic_block"
+    STALE_QUOTE_BLOCK = "stale_quote_block"
+    UNDEFINED_RISK_BLOCK = "undefined_risk_block"
+    MAX_LOSS_DAY_BLOCK = "max_loss_day_block"
+    MAX_LOSS_TRADE_BLOCK = "max_loss_trade_block"
+    MAX_LOTS_BLOCK = "max_lots_block"
+    MARGIN_BLOCK = "margin_block"
+    CASH_NO_TRADE = "cash_no_trade"
+
+
+NAKED_SHORT_STRATEGIES = frozenset(
+    {
+        "short_strangle",
+        "short_straddle",
+        "naked_short_call",
+        "naked_short_put",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +172,105 @@ class RiskGatekeeper:
             allowed_lots=allowed_lots,
             expected_round_trip_cost=expected_cost,
         )
+
+
+def evaluate_from_context(
+    ctx: AgentContext,
+    *,
+    config: RiskConfig,
+    gatekeeper: RiskGatekeeper | None = None,
+    current_capital: float = BASE_CAPITAL_INR,
+    requested_lots: int = 1,
+) -> AgentContext:
+    """Apply post-critic gatekeeper rules from AgentContext."""
+    gk = gatekeeper or RiskGatekeeper(
+        max_daily_loss=-clamp_to_absolute("max_loss_per_day_inr", config.max_loss_per_day_inr),
+    )
+
+    strategy_decision = ctx.strategy_decision
+    if strategy_decision is None or strategy_decision.strategy == "cash_no_trade":
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason="No actionable strategy selected.",
+                rule_id=GatekeeperRule.CASH_NO_TRADE,
+            )
+        )
+
+    strategy_key = strategy_decision.strategy.strip().lower()
+    expected_cost = round_trip_slippage(strategy_key)
+
+    critic = ctx.critic_decision
+    if critic is None or critic.status != CriticStatus.APPROVE:
+        rule = GatekeeperRule.CRITIC_BLOCK
+        if critic is not None and critic.reason == "stale_quote_abort":
+            rule = GatekeeperRule.STALE_QUOTE_BLOCK
+        detail = critic.reason if critic is not None else "critic_missing"
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=f"Critic veto: {detail}",
+                rule_id=rule,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
+
+    if strategy_key in NAKED_SHORT_STRATEGIES:
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=f"Undefined risk block for naked short strategy: {strategy_key}",
+                rule_id=GatekeeperRule.UNDEFINED_RISK_BLOCK,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
+
+    max_day_loss = -clamp_to_absolute("max_loss_per_day_inr", config.max_loss_per_day_inr)
+    if ctx.daily_pnl <= max_day_loss:
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=f"Daily loss cap breached: {ctx.daily_pnl:.2f} <= {max_day_loss:.2f}",
+                rule_id=GatekeeperRule.MAX_LOSS_DAY_BLOCK,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
+
+    max_lots = int(clamp_to_absolute("max_lots_per_trade", float(config.max_lots_per_trade)))
+    if requested_lots > max_lots:
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=f"Max lots block: requested {requested_lots} > {max_lots}",
+                rule_id=GatekeeperRule.MAX_LOTS_BLOCK,
+                allowed_lots=max_lots,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
+
+    feature_payload = _feature_payload_from_ctx(ctx)
+    legacy = gk.evaluate(
+        strategy=strategy_key,
+        feature_payload=feature_payload,
+        daily_realized_pnl=ctx.daily_pnl,
+        current_capital=current_capital,
+        requested_lots=requested_lots,
+    )
+    return ctx.update(gatekeeper_decision=legacy)
+
+
+def _feature_payload_from_ctx(ctx: AgentContext) -> dict[str, Any]:
+    regime = ctx.opening_regime
+    payload: dict[str, Any] = {"dte": ctx.dte}
+    if regime.nifty_ad_ratio is not None:
+        payload["NIFTY_500_AD_Ratio"] = regime.nifty_ad_ratio
+    if regime.vix is not None:
+        payload["vix"] = regime.vix
+    if regime.vix_atr_divergence is not None:
+        payload["VIX_ATR_Divergence"] = regime.vix_atr_divergence
+    if regime.expiry_weighted_pcr_momentum is not None:
+        payload["Expiry_Weighted_PCR_Momentum"] = regime.expiry_weighted_pcr_momentum
+    return payload
 
 
 def _read_float(payload: dict[str, Any], *keys: str) -> float:
