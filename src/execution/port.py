@@ -8,9 +8,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from src.core.context import OpenPosition
 from src.orchestration.session_clock import IST
 
 OrderStatus = Literal["ACCEPTED", "REJECTED", "DEFERRED"]
+
+
+class ExecutionFailedError(RuntimeError):
+    """Raised when broker leg submission or flatten hard-fails."""
+
+
 CancelStatus = Literal["ACCEPTED", "REJECTED"]
 OrderSide = Literal["BUY", "SELL"]
 
@@ -73,23 +80,40 @@ def idem_key(
 
 
 class ExecutionPort(ABC):
-    """Async broker execution boundary. Implementations must not raise from public methods."""
+    """Async broker execution boundary."""
 
     async def submit_legs(self, intent: LegActionIntent) -> OrderAck:
         try:
-            return await self._submit_legs_impl(intent)
+            ack = await self._submit_legs_impl(intent)
+        except ExecutionFailedError:
+            raise
         except Exception as exc:
-            return OrderAck(
-                leg_id=intent.leg_id,
-                order_id=None,
-                status="REJECTED",
-                reason=str(exc),
-                submitted_at=datetime.now(IST),
+            raise ExecutionFailedError(
+                f"submit_legs failed for {intent.symbol}: {exc}"
+            ) from exc
+        if ack.status == "REJECTED":
+            raise ExecutionFailedError(
+                f"submit_legs rejected for {intent.symbol}: {ack.reason or 'unknown'}"
             )
+        return ack
 
     @abstractmethod
     async def _submit_legs_impl(self, intent: LegActionIntent) -> OrderAck:
-        """Subclass hook; may raise — wrapped fail-closed by submit_legs()."""
+        """Subclass hook; return REJECTED ack or raise — submit_legs() escalates both."""
+
+    async def flatten_position(self, position: OpenPosition) -> None:
+        try:
+            await self._flatten_position_impl(position)
+        except ExecutionFailedError:
+            raise
+        except Exception as exc:
+            raise ExecutionFailedError(
+                f"flatten_position failed for {position.symbol}: {exc}"
+            ) from exc
+
+    @abstractmethod
+    async def _flatten_position_impl(self, position: OpenPosition) -> None:
+        """Close all legs at market; raise ExecutionFailedError on broker failure."""
 
     @abstractmethod
     async def cancel_order(self, order_id: str) -> CancelAck:

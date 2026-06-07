@@ -35,6 +35,7 @@ class GatekeeperRule(StrEnum):
     MAX_LOTS_BLOCK = "max_lots_block"
     MARGIN_BLOCK = "margin_block"
     CASH_NO_TRADE = "cash_no_trade"
+    MISSING_DATA = "missing_data"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +97,6 @@ class RiskGatekeeper:
         current_capital: float = BASE_CAPITAL_INR,
         requested_lots: int = 1,
     ) -> GatekeeperDecision:
-        vix = _read_float(feature_payload, "vix", "VIX")
-        dte = _read_int(feature_payload, "dte", "DTE")
         strategy_key = _strategy_key(strategy)
         allowed_lots = compute_allowed_lots(
             current_capital,
@@ -105,6 +104,8 @@ class RiskGatekeeper:
             step=self.lot_scaling_step,
         )
         expected_cost = round_trip_slippage(strategy_key)
+        vix = _optional_float(feature_payload, "vix", "VIX")
+        dte = _optional_int(feature_payload, "dte", "DTE")
 
         if daily_realized_pnl <= self.max_daily_loss:
             return GatekeeperDecision(
@@ -130,16 +131,32 @@ class RiskGatekeeper:
                 expected_round_trip_cost=expected_cost,
             )
 
-        if strategy_key == StrategyName.IRON_CONDOR.value and vix > self.vix_ceiling:
-            return GatekeeperDecision(
-                verdict=GatekeeperVerdict.REJECT,
-                reason=f"VIX ceiling breached for short-vol RANGE strategy: {vix:.2f} > {self.vix_ceiling:.2f}",
-                rule_id=GatekeeperRule.VIX_CEILING,
-                allowed_lots=allowed_lots,
-                expected_round_trip_cost=expected_cost,
-            )
+        if strategy_key == StrategyName.IRON_CONDOR.value:
+            if vix is None:
+                return _missing_data_decision(
+                    field="vix",
+                    allowed_lots=allowed_lots,
+                    expected_cost=expected_cost,
+                )
+            if dte is None:
+                return _missing_data_decision(
+                    field="dte",
+                    allowed_lots=allowed_lots,
+                    expected_cost=expected_cost,
+                )
+            if vix > self.vix_ceiling:
+                return GatekeeperDecision(
+                    verdict=GatekeeperVerdict.REJECT,
+                    reason=(
+                        f"VIX ceiling breached for short-vol RANGE strategy: "
+                        f"{vix:.2f} > {self.vix_ceiling:.2f}"
+                    ),
+                    rule_id=GatekeeperRule.VIX_CEILING,
+                    allowed_lots=allowed_lots,
+                    expected_round_trip_cost=expected_cost,
+                )
 
-        if strategy_key == StrategyName.IRON_CONDOR.value and dte <= self.expiry_dte_block:
+        if strategy_key == StrategyName.IRON_CONDOR.value and dte is not None and dte <= self.expiry_dte_block:
             return GatekeeperDecision(
                 verdict=GatekeeperVerdict.REJECT,
                 reason=f"Gamma/DTE filter: DTE {dte} <= {self.expiry_dte_block} for RANGE strategy",
@@ -248,15 +265,32 @@ def _feature_payload_from_ctx(ctx: AgentContext) -> dict[str, Any]:
     return payload
 
 
-def _read_float(payload: dict[str, Any], *keys: str) -> float:
-    for key in keys:
-        if key in payload and payload[key] is not None:
-            return float(payload[key])
-    raise KeyError(f"Missing required numeric field: one of {keys}")
+def _missing_data_decision(
+    *,
+    field: str,
+    allowed_lots: int,
+    expected_cost: float,
+) -> GatekeeperDecision:
+    return GatekeeperDecision(
+        verdict=GatekeeperVerdict.REJECT,
+        reason=f"Missing required feature field: {field}",
+        rule_id=GatekeeperRule.MISSING_DATA,
+        allowed_lots=allowed_lots,
+        expected_round_trip_cost=expected_cost,
+    )
 
 
-def _read_int(payload: dict[str, Any], *keys: str) -> int:
+def _optional_float(payload: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
-        if key in payload and payload[key] is not None:
-            return int(payload[key])
-    raise KeyError(f"Missing required integer field: one of {keys}")
+        value = payload.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _optional_int(payload: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return int(value)
+    return None

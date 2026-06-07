@@ -291,8 +291,8 @@ class GreeksIntegrationTests(unittest.TestCase):
             live_underlying_ltp=25050.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence=greeks[0].confidence,
-            greeks_delta=greeks[0].delta,
-            greeks_gamma=greeks[0].gamma,
+            leg_deltas=[greeks[0].delta],
+            leg_gammas=[greeks[0].gamma],
             config=config,
         )
         self.assertEqual(result.critic_decision.status, CriticStatus.REJECT)

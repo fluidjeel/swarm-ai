@@ -19,6 +19,20 @@ from typing import Any, Callable, Protocol
 from src.config.secrets import get_fyers_credentials, load_project_env
 from src.core.context import AgentContext, CriticStatus
 from src.data.fyers_provider import FyersMarketDataProvider
+from src.execution.fyers_port import FyersExecutionPort
+from src.execution.noop_port import NoOpExecutionPort
+from src.observability.tick_trace import (
+    JsonlTickTraceWriter,
+    build_tick_trace_row,
+    default_tick_trace_path,
+)
+from src.orchestration.runtime_guards import (
+    MemoryGuardError,
+    JsonlHeartbeatWriter,
+    check_memory_usage,
+    default_heartbeat_path,
+    write_tick_heartbeat,
+)
 from src.orchestration.session_clock import IST, current_phase, is_trading_day
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
 from src.orchestration.tick_lock import FileTickLock
@@ -193,6 +207,8 @@ class PaperSoakRunner:
         duration_hours: float = DEFAULT_SOAK_HOURS,
         sleep_fn: Callable[[float], Any] | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        wall_now_fn: Callable[[], datetime] | None = None,
+        memory_guard_enabled: bool = True,
     ) -> None:
         self._pipeline = pipeline
         self._session_id = session_id
@@ -201,10 +217,24 @@ class PaperSoakRunner:
         self._duration = timedelta(hours=duration_hours)
         self._sleep = sleep_fn or asyncio.sleep
         self._now = now_fn or (lambda: datetime.now(IST))
+        self._wall_now = wall_now_fn or (lambda: datetime.now(IST))
         self._stats = PaperSoakStats()
         self._stop = False
         self._tick_number = 0
         self._started_at: datetime | None = None
+        self._started_at_wall: datetime | None = None
+        self._heartbeat: JsonlHeartbeatWriter | None = None
+        self._tick_trace: JsonlTickTraceWriter | None = None
+        self._memory_guard_enabled = memory_guard_enabled
+
+    def configure_observability(
+        self,
+        *,
+        heartbeat: JsonlHeartbeatWriter | None = None,
+        tick_trace: JsonlTickTraceWriter | None = None,
+    ) -> None:
+        self._heartbeat = heartbeat
+        self._tick_trace = tick_trace
 
     def request_stop(self) -> None:
         self._stop = True
@@ -216,6 +246,7 @@ class PaperSoakRunner:
     async def run(self, ctx: AgentContext | None = None) -> dict[str, Any]:
         ctx = ctx or AgentContext(session_id=self._session_id)
         self._started_at = self._now()
+        self._started_at_wall = self._wall_now()
 
         try:
             if is_trading_day(self._started_at):
@@ -244,6 +275,23 @@ class PaperSoakRunner:
                 tick_start = time.perf_counter()
                 exit_action: str | None = None
                 live_ltp: float | None = None
+                memory_pct = 0.0
+                if self._memory_guard_enabled:
+                    try:
+                        memory_pct = check_memory_usage().percent_used
+                    except MemoryGuardError as exc:
+                        self._stats.broker_errors += 1
+                        self._logger.log_paper_row(
+                            {
+                                "event": "paper_tick_error",
+                                "session_id": self._session_id,
+                                "timestamp": now.isoformat(),
+                                "detail": str(exc),
+                                "code": "MEMORY_GUARD",
+                            }
+                        )
+                        self.request_stop()
+                        break
                 try:
                     result = await self._pipeline.run_tick(ctx)
                     ctx = result.ctx
@@ -268,6 +316,24 @@ class PaperSoakRunner:
                             exit_action=exit_action,
                         )
                     )
+                    if self._tick_trace is not None:
+                        self._tick_trace.write_tick(
+                            build_tick_trace_row(
+                                session_id=self._session_id,
+                                tick_number=self._tick_number,
+                                ctx=ctx,
+                                elapsed_ms=elapsed_ms,
+                                phase=current_phase(now).value,
+                            )
+                        )
+                    if self._heartbeat is not None:
+                        write_tick_heartbeat(
+                            self._heartbeat,
+                            session_id=self._session_id,
+                            tick_number=self._tick_number,
+                            memory_pct=memory_pct,
+                            elapsed_ms=elapsed_ms,
+                        )
                 except SessionPipelineError as exc:
                     self._stats.broker_errors += 1
                     self._logger.log_paper_row(
@@ -290,9 +356,9 @@ class PaperSoakRunner:
         return summary
 
     def _within_duration(self) -> bool:
-        if self._started_at is None:
+        if self._started_at_wall is None:
             return True
-        return self._now() - self._started_at < self._duration
+        return self._wall_now() - self._started_at_wall < self._duration
 
     def _record_tick_stats(
         self,
@@ -326,10 +392,19 @@ class PaperSoakRunner:
         self._stats.paper_exits += 1
 
     @classmethod
-    def from_env(cls, *, logger: PaperEventLogger | None = None) -> PaperSoakRunner:
+    def from_env(
+        cls,
+        *,
+        logger: PaperEventLogger | None = None,
+        exercise_broker: bool = False,
+    ) -> PaperSoakRunner:
         load_project_env()
         app_id, access_token = get_fyers_credentials()
-        provider = FyersMarketDataProvider(app_id=app_id, access_token=access_token)
+        provider = FyersMarketDataProvider(
+            app_id=app_id,
+            access_token=access_token,
+            request_timeout_sec=60.0,
+        )
         session_id = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4().hex[:12]}")
         tick_seconds = float(os.getenv("PAPER_TICK_SECONDS", str(DEFAULT_TICK_SECONDS)))
         duration_hours = float(os.getenv("PAPER_SOAK_HOURS", str(DEFAULT_SOAK_HOURS)))
@@ -337,19 +412,32 @@ class PaperSoakRunner:
         log_path = log_dir / f"{session_id}.jsonl"
         paper_logger = logger or JsonlPaperLogger(log_path)
 
+        execution_port = (
+            FyersExecutionPort(app_id=app_id, access_token=access_token)
+            if exercise_broker
+            else NoOpExecutionPort()
+        )
         pipeline = SessionPipeline(
             provider,
             tick_lock=FileTickLock(default_paper_tick_lock_path()),
             dry_run=True,
             paper_logger=paper_logger,
+            execution_port=execution_port,
+            broker_sync=exercise_broker,
+            memory_guard_enabled=True,
         )
-        return cls(
+        runner = cls(
             pipeline,
             session_id=session_id,
             logger=paper_logger,
             tick_seconds=tick_seconds,
             duration_hours=duration_hours,
         )
+        runner.configure_observability(
+            heartbeat=JsonlHeartbeatWriter(default_heartbeat_path()),
+            tick_trace=JsonlTickTraceWriter(default_tick_trace_path(session_id)),
+        )
+        return runner
 
 
 async def _async_main(argv: list[str] | None = None) -> int:
@@ -366,9 +454,27 @@ async def _async_main(argv: list[str] | None = None) -> int:
         default=None,
         help="Seconds between ticks (default: PAPER_TICK_SECONDS or 300).",
     )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Offline mock soak (fake provider, no Fyers network). For CI / pre-flight.",
+    )
+    parser.add_argument(
+        "--broker",
+        action="store_true",
+        help=(
+            "Wire FyersExecutionPort: real orders + per-tick position reconcile. "
+            "Default is NoOp (quotes/greeks only)."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    runner = PaperSoakRunner.from_env()
+    if args.mock:
+        from src.orchestration.mock_soak import build_mock_runner
+
+        runner = build_mock_runner(exercise_broker=args.broker)
+    else:
+        runner = PaperSoakRunner.from_env(exercise_broker=args.broker)
     if args.hours is not None:
         runner._duration = timedelta(hours=args.hours)
     if args.tick_seconds is not None:

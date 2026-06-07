@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from src.core.context import OpenPosition
 from src.execution.port import (
     CancelAck,
     ExecutionPort,
@@ -30,6 +31,9 @@ class NoOpExecutionPort(ExecutionPort):
             reason="EXEC_SKIPPED — no port wired",
             submitted_at=datetime.now(IST),
         )
+
+    async def _flatten_position_impl(self, position: OpenPosition) -> None:
+        logger.info("EXEC_SKIPPED — flatten_position: %s", position.symbol)
 
     async def cancel_order(self, order_id: str) -> CancelAck:
         logger.info("EXEC_SKIPPED — cancel_order: %s", order_id)

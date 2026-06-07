@@ -6,7 +6,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from src.core.context import OpenPosition, StrategyDecision, StrategyName
+from src.core.context import AgentContext, OpenPosition, StrategyDecision, StrategyName
 
 
 class StrategyNameEnumTests(unittest.TestCase):
@@ -43,6 +43,19 @@ class StrategyNameEnumTests(unittest.TestCase):
                 strategy="short_strangle",
                 supporting_signals=["ad_ratio=1.10", "vix=15.00"],
             )
+
+
+class AgentContextImmutabilityTests(unittest.TestCase):
+    def test_agent_context_is_frozen(self) -> None:
+        ctx = AgentContext(session_id="frozen-context-01")
+        with self.assertRaises(ValidationError):
+            ctx.daily_pnl = -100.0  # type: ignore[misc]
+
+    def test_update_returns_new_instance(self) -> None:
+        ctx = AgentContext(session_id="frozen-context-02")
+        updated = ctx.update(execution_halted=True)
+        self.assertFalse(ctx.execution_halted)
+        self.assertTrue(updated.execution_halted)
 
 
 class OpenPositionStrategyTests(unittest.TestCase):

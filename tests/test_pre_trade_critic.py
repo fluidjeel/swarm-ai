@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from src.agents.pre_trade_critic import validate_pre_trade
+from src.agents.pre_trade_critic import (
+    LEG_DELTA_ABS_MAX,
+    LEG_DELTA_ABS_MIN,
+    validate_pre_trade,
+)
 from src.config.risk_config import RiskConfig
 from src.core.context import AgentContext, CriticStatus
 
@@ -26,8 +30,20 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24852.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
+            config=CONFIG,
+        )
+        self.assertEqual(result.critic_decision.status, CriticStatus.APPROVE)
+
+    def test_approves_multi_leg_spread_with_per_leg_delta_bounds(self) -> None:
+        result = validate_pre_trade(
+            _ready_ctx(),
+            live_underlying_ltp=24852.0,
+            bid_ask_spread_pct=0.02,
+            greeks_confidence="high",
+            leg_deltas=[-0.31, -0.15, 0.31, 0.15],
+            leg_gammas=[0.01, 0.01, 0.01, 0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.status, CriticStatus.APPROVE)
@@ -38,8 +54,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "baseline_not_initialized")
@@ -51,8 +67,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "snapshot_price_missing")
@@ -63,8 +79,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24861.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "stale_quote_abort")
@@ -75,8 +91,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24860.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.status, CriticStatus.APPROVE)
@@ -87,8 +103,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.06,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "spread_too_wide")
@@ -99,20 +115,44 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="low",
-            greeks_delta=0.25,
-            greeks_gamma=0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "greeks_low_confidence")
 
-    def test_rejects_greeks_out_of_bounds(self) -> None:
+    def test_approves_five_delta_long_wing_at_lower_bound(self) -> None:
         result = validate_pre_trade(
             _ready_ctx(),
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=1.5,
-            greeks_gamma=0.01,
+            leg_deltas=[-0.31, -0.15, 0.31, LEG_DELTA_ABS_MIN],
+            leg_gammas=[0.01, 0.01, 0.01, 0.01],
+            config=CONFIG,
+        )
+        self.assertEqual(result.critic_decision.status, CriticStatus.APPROVE)
+
+    def test_rejects_single_leg_delta_out_of_bounds(self) -> None:
+        result = validate_pre_trade(
+            _ready_ctx(),
+            live_underlying_ltp=24850.0,
+            bid_ask_spread_pct=0.02,
+            greeks_confidence="high",
+            leg_deltas=[LEG_DELTA_ABS_MAX + 0.01],
+            leg_gammas=[0.01],
+            config=CONFIG,
+        )
+        self.assertEqual(result.critic_decision.reason, "greeks_out_of_bounds")
+
+    def test_rejects_any_leg_in_multi_leg_spread(self) -> None:
+        result = validate_pre_trade(
+            _ready_ctx(),
+            live_underlying_ltp=24850.0,
+            bid_ask_spread_pct=0.02,
+            greeks_confidence="high",
+            leg_deltas=[-0.31, -0.15, 0.99, 0.15],
+            leg_gammas=[0.01, 0.01, 0.01, 0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "greeks_out_of_bounds")
@@ -123,8 +163,8 @@ class PreTradeCriticTests(unittest.TestCase):
             live_underlying_ltp=24850.0,
             bid_ask_spread_pct=0.02,
             greeks_confidence="high",
-            greeks_delta=0.25,
-            greeks_gamma=-0.01,
+            leg_deltas=[0.25],
+            leg_gammas=[-0.01],
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "greeks_out_of_bounds")

@@ -78,8 +78,8 @@ class SymbolResolverCriticIntegrationTests(unittest.TestCase):
             live_underlying_ltp=25000.0,
             bid_ask_spread_pct=0.01,
             greeks_confidence=min(leg.confidence for leg in legs),
-            greeks_delta=sum(leg.delta for leg in legs),
-            greeks_gamma=sum(leg.gamma for leg in legs),
+            leg_deltas=[leg.delta for leg in legs],
+            leg_gammas=[leg.gamma for leg in legs],
             config=self.config,
         )
         self.assertEqual(approved.critic_decision.status.value, "APPROVE")
@@ -95,8 +95,8 @@ class SymbolResolverCriticIntegrationTests(unittest.TestCase):
             live_underlying_ltp=25020.0,
             bid_ask_spread_pct=0.01,
             greeks_confidence=min(leg.confidence for leg in legs),
-            greeks_delta=sum(leg.delta for leg in legs),
-            greeks_gamma=sum(leg.gamma for leg in legs),
+            leg_deltas=[leg.delta for leg in legs],
+            leg_gammas=[leg.gamma for leg in legs],
             config=self.config,
         )
         self.assertEqual(rejected.critic_decision.reason, "stale_quote_abort")

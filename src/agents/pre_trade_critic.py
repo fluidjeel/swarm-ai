@@ -5,6 +5,10 @@ from __future__ import annotations
 from src.config.risk_config import RiskConfig
 from src.core.context import AgentContext, CriticDecision, CriticStatus
 
+# Wide enough for 5-delta iron-condor long wings (|delta| ~= 0.05).
+LEG_DELTA_ABS_MIN = 0.03
+LEG_DELTA_ABS_MAX = 0.97
+
 
 def validate_pre_trade(
     ctx: AgentContext,
@@ -12,8 +16,8 @@ def validate_pre_trade(
     live_underlying_ltp: float,
     bid_ask_spread_pct: float,
     greeks_confidence: str,
-    greeks_delta: float | None,
-    greeks_gamma: float | None,
+    leg_deltas: list[float],
+    leg_gammas: list[float],
     config: RiskConfig,
 ) -> AgentContext:
     """Pure math. Reject if baseline, snapshot, stale quote, spread, or greeks fail."""
@@ -52,20 +56,29 @@ def validate_pre_trade(
                 reason="greeks_low_confidence",
             )
         )
-    if greeks_delta is None or greeks_gamma is None:
+    if not leg_deltas or not leg_gammas or len(leg_deltas) != len(leg_gammas):
         return ctx.update(
             critic_decision=CriticDecision(
                 status=CriticStatus.REJECT,
                 reason="greeks_missing",
             )
         )
-    if not (-1.0 <= greeks_delta <= 1.0) or greeks_gamma < 0 or greeks_gamma > config.max_gamma:
-        return ctx.update(
-            critic_decision=CriticDecision(
-                status=CriticStatus.REJECT,
-                reason="greeks_out_of_bounds",
+    for delta in leg_deltas:
+        if not (LEG_DELTA_ABS_MIN <= abs(delta) <= LEG_DELTA_ABS_MAX):
+            return ctx.update(
+                critic_decision=CriticDecision(
+                    status=CriticStatus.REJECT,
+                    reason="greeks_out_of_bounds",
+                )
             )
-        )
+    for gamma in leg_gammas:
+        if gamma < 0 or gamma > config.max_gamma:
+            return ctx.update(
+                critic_decision=CriticDecision(
+                    status=CriticStatus.REJECT,
+                    reason="greeks_out_of_bounds",
+                )
+            )
     return ctx.update(
         critic_decision=CriticDecision(
             status=CriticStatus.APPROVE,

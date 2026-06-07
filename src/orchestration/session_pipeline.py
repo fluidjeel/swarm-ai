@@ -19,10 +19,19 @@ from src.agents.symbol_resolver import (
     select_strategy_symbols,
 )
 from src.config.risk_config import RiskConfig, load_risk_config
-from src.core.context import AgentContext, CriticDecision, CriticStatus, RegimeLabel, StrategyName
+from src.core.context import (
+    AgentContext,
+    CriticDecision,
+    CriticStatus,
+    OpenPosition,
+    RegimeLabel,
+    StrategyName,
+)
 from src.data.base_provider import OptionGreeks
+from src.execution.fill_reconcile import verify_entry_fills
 from src.execution.noop_port import NoOpExecutionPort
-from src.execution.port import ExecutionPort, LegActionIntent, OrderAck, idem_key
+from src.execution.port import ExecutionFailedError, ExecutionPort, LegActionIntent, OrderAck, idem_key
+from src.orchestration.runtime_guards import MemoryGuardError, check_memory_usage
 from src.data.base_provider import FyersAuthError, MarketDataError, MarketDataProvider, OhlcvBar, Quote
 from src.risk.gatekeeper import GatekeeperVerdict, evaluate_from_context
 from src.features.feature_engine import (
@@ -30,7 +39,11 @@ from src.features.feature_engine import (
     FeatureEngineErrorCode,
     compute_feature_payload,
 )
-from src.orchestration.broker_recovery import BootLogger, rebuild_from_fyers
+from src.orchestration.broker_recovery import (
+    BootLogger,
+    rebuild_from_fyers,
+    sync_position_from_broker,
+)
 from src.orchestration.context_adapters import (
     apply_feature_payload,
     opening_regime_to_feature_payload,
@@ -109,6 +122,8 @@ class SessionPipeline:
         dry_run: bool = False,
         paper_logger: PaperEventLogger | None = None,
         execution_port: ExecutionPort | None = None,
+        broker_sync: bool = False,
+        memory_guard_enabled: bool = False,
     ) -> None:
         self._provider = provider
         self._exit_engine = exit_engine or ExitEngine()
@@ -124,6 +139,8 @@ class SessionPipeline:
         self._boot_logger = boot_logger
         self._dry_run = dry_run
         self._paper_logger = paper_logger
+        self._broker_sync = broker_sync
+        self._memory_guard_enabled = memory_guard_enabled
         if tick_lock is not None:
             self._tick_lock = tick_lock
         elif enforce_tick_lock:
@@ -244,11 +261,33 @@ class SessionPipeline:
                 code="TICK_LOCK",
             ) from exc
 
+        if self._memory_guard_enabled:
+            try:
+                check_memory_usage()
+            except MemoryGuardError as exc:
+                raise SessionPipelineError(str(exc), code="MEMORY_GUARD") from exc
+
         live_underlying_ltp: float | None = None
         tick_timestamp = datetime.now(IST).isoformat()
         try:
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx)
+            if self._broker_sync:
+                prior_symbol = ctx.open_position.symbol if ctx.open_position else None
+                ctx = await sync_position_from_broker(self._provider, ctx)
+                if self._paper_logger is not None:
+                    current_symbol = ctx.open_position.symbol if ctx.open_position else None
+                    if prior_symbol != current_symbol:
+                        self._paper_logger.log_paper_row(
+                            {
+                                "event": "BROKER_POSITION_SYNC",
+                                "session_id": ctx.session_id,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "prior_symbol": prior_symbol,
+                                "current_symbol": current_symbol,
+                                "execution_halted": ctx.execution_halted,
+                            }
+                        )
 
             if ctx.is_halted and not ctx.has_open_position:
                 return SessionTickResult(
@@ -284,8 +323,14 @@ class SessionPipeline:
 
             if exit_decision.action == ExitAction.EXIT_MARKET:
                 self._maybe_log_paper_exit(ctx, exit_decision)
-                ctx = ctx.update(open_position=None)
-                self._session_open_vix = None
+                try:
+                    if ctx.open_position is not None:
+                        await self._execution_port.flatten_position(ctx.open_position)
+                except ExecutionFailedError:
+                    ctx = ctx.update(execution_halted=True)
+                else:
+                    ctx = ctx.update(open_position=None)
+                    self._session_open_vix = None
 
             return SessionTickResult(
                 ctx=ctx,
@@ -316,6 +361,7 @@ class SessionPipeline:
 
         if ctx.regime_decision != RegimeLabel.UNCERTAIN:
             selected_legs: list[OptionGreeks] = []
+            per_leg_quotes: dict[str, Quote] = {}
             try:
                 expiry_ts = select_expiry(ctx, config=self._risk_config)
                 greeks_list = await self._provider.get_option_chain_greeks(
@@ -331,19 +377,22 @@ class SessionPipeline:
                     await self._provider.get_index_ltp(NIFTY_INDEX_SYMBOL)
                 )
 
-                per_leg_spreads: dict[str, float] = {}
                 for leg_greek in selected_legs:
                     leg_quote = await self._provider.get_bid_ask(leg_greek.symbol)
-                    per_leg_spreads[leg_greek.symbol] = leg_quote.spread_pct
-                max_spread = max(per_leg_spreads.values()) if per_leg_spreads else 0.0
+                    per_leg_quotes[leg_greek.symbol] = leg_quote
+                max_spread = (
+                    max(quote.spread_pct for quote in per_leg_quotes.values())
+                    if per_leg_quotes
+                    else 0.0
+                )
 
                 ctx = validate_pre_trade(
                     ctx,
                     live_underlying_ltp=live_underlying_ltp,
                     bid_ask_spread_pct=max_spread,
                     greeks_confidence=min(leg_g.confidence for leg_g in selected_legs),
-                    greeks_delta=sum(leg_g.delta for leg_g in selected_legs),
-                    greeks_gamma=sum(leg_g.gamma for leg_g in selected_legs),
+                    leg_deltas=[leg_g.delta for leg_g in selected_legs],
+                    leg_gammas=[leg_g.gamma for leg_g in selected_legs],
                     config=self._risk_config,
                 )
             except (ExpirySelectionError, StrikeSelectionError) as exc:
@@ -361,12 +410,22 @@ class SessionPipeline:
                     )
                 )
             ctx = evaluate_from_context(ctx, config=self._risk_config)
-            if self._dry_run and selected_legs:
-                await self._submit_approved_entry_legs(
-                    ctx,
-                    selected_legs=selected_legs,
-                    tick_timestamp=tick_timestamp,
-                )
+            gatekeeper = ctx.gatekeeper_decision
+            if (
+                self._dry_run
+                and selected_legs
+                and gatekeeper is not None
+                and gatekeeper.verdict == GatekeeperVerdict.APPROVE
+            ):
+                try:
+                    ctx = await self._submit_approved_entry_legs(
+                        ctx,
+                        selected_legs=selected_legs,
+                        per_leg_quotes=per_leg_quotes,
+                        tick_timestamp=tick_timestamp,
+                    )
+                except ExecutionFailedError:
+                    ctx = ctx.update(execution_halted=True)
 
         return ctx, live_underlying_ltp
 
@@ -375,18 +434,20 @@ class SessionPipeline:
         ctx: AgentContext,
         *,
         selected_legs: list[OptionGreeks],
+        per_leg_quotes: dict[str, Quote],
         tick_timestamp: str,
-    ) -> None:
+    ) -> AgentContext:
         gatekeeper = ctx.gatekeeper_decision
         if gatekeeper is None or gatekeeper.verdict != GatekeeperVerdict.APPROVE:
-            return
+            return ctx
         strategy = ctx.strategy_decision.strategy if ctx.strategy_decision else None
         if strategy is None:
-            return
+            return ctx
         sides = _ENTRY_LEG_SIDES.get(strategy)
         if sides is None or len(sides) != len(selected_legs):
-            return
+            return ctx
 
+        submitted_intents: list[LegActionIntent] = []
         for leg_greek, side in zip(selected_legs, sides, strict=True):
             leg_id = leg_greek.symbol
             intent = LegActionIntent(
@@ -401,8 +462,22 @@ class SessionPipeline:
                     side=side,
                 ),
             )
+            submitted_intents.append(intent)
             ack = await self._execution_port.submit_legs(intent)
             self._maybe_log_order_ack(ctx, intent=intent, ack=ack)
+
+        if self._broker_sync:
+            await verify_entry_fills(self._execution_port, submitted_intents)
+
+        # v4.1: OpenPosition is built from submit intent (selected_legs + quotes),
+        # not broker fills. Phase 4.2 must reconcile via get_positions() each tick.
+        open_position = _build_open_position_from_entry(
+            strategy=strategy,
+            selected_legs=selected_legs,
+            per_leg_quotes=per_leg_quotes,
+            lots=gatekeeper.allowed_lots,
+        )
+        return ctx.update(open_position=open_position)
 
     def _maybe_log_order_ack(
         self,
@@ -611,3 +686,38 @@ class SessionPipeline:
             feature_payload=feature_payload,
             session_open_vix=open_vix,
         )
+
+
+def _build_open_position_from_entry(
+    *,
+    strategy: StrategyName,
+    selected_legs: list[OptionGreeks],
+    per_leg_quotes: dict[str, Quote],
+    lots: int,
+) -> OpenPosition:
+    """Construct in-memory position from submitted legs (v4.1 pre-broker-sync)."""
+    strategy_id = strategy.value
+    leg_positions: list[OpenPosition] = []
+    for leg in selected_legs:
+        quote = per_leg_quotes[leg.symbol]
+        leg_positions.append(
+            OpenPosition(
+                symbol=leg.symbol,
+                strategy=strategy,
+                lots=lots,
+                entry_price=quote.ltp,
+                leg_id=leg.symbol,
+                strategy_id=strategy_id,
+            )
+        )
+    entry_avg = sum(position.entry_price for position in leg_positions) / len(leg_positions)
+    if len(leg_positions) >= 2:
+        return OpenPosition(
+            symbol=f"{strategy_id}_summary",
+            strategy=strategy,
+            lots=lots,
+            entry_price=entry_avg,
+            strategy_id=strategy_id,
+            legs=leg_positions,
+        )
+    return leg_positions[0]

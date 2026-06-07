@@ -7,7 +7,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from src.execution.mock_port import MockExecutionPort
-from src.execution.port import LegActionIntent, idem_key
+from src.execution.port import ExecutionFailedError, LegActionIntent, idem_key
 from src.orchestration.session_clock import IST
 
 
@@ -39,11 +39,25 @@ class ExecutionPortTests(unittest.IsolatedAsyncioTestCase):
         port.configure_failure_at(2)
 
         first = await port.submit_legs(_intent(tag="fail-1"))
-        second = await port.submit_legs(_intent(tag="fail-2"))
-
         self.assertEqual(first.status, "ACCEPTED")
-        self.assertEqual(second.status, "REJECTED")
-        self.assertEqual(second.reason, "SIMULATED_BROKER_ERROR")
+
+        with self.assertRaises(ExecutionFailedError):
+            await port.submit_legs(_intent(tag="fail-2"))
+
+    async def test_flatten_position_failure_raises(self) -> None:
+        from src.core.context import OpenPosition
+
+        port = MockExecutionPort()
+        port.configure_flatten_failure()
+        position = OpenPosition(
+            symbol="iron_condor_summary",
+            strategy="iron_condor",
+            lots=1,
+            entry_price=100.0,
+        )
+
+        with self.assertRaises(ExecutionFailedError):
+            await port.flatten_position(position)
 
     async def test_health_check_reports_latency(self) -> None:
         port = MockExecutionPort()

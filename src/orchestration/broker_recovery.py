@@ -210,3 +210,37 @@ async def rebuild_from_fyers(
         open_position=open_position,
     )
     return ctx.update(open_position=open_position)
+
+
+async def sync_position_from_broker(
+    provider: MarketDataProvider,
+    ctx: AgentContext,
+) -> AgentContext:
+    """
+    Per-tick reconcile in-memory open_position against Fyers GET /positions.
+
+    Fail-soft on broker errors (keeps existing ctx). Fail-closed on orphan/partial
+    multi-leg sets (sets execution_halted).
+    """
+    try:
+        positions = await provider.get_positions()
+    except MarketDataError:
+        return ctx
+
+    if not positions:
+        if ctx.open_position is None:
+            return ctx
+        return ctx.update(open_position=None)
+
+    try:
+        open_position = _resolve_position_group(
+            positions,
+            session_id=ctx.session_id,
+            boot_logger=_DEFAULT_BOOT_LOGGER,
+        )
+    except (OrphanLegError, PartialFillError):
+        return ctx.update(execution_halted=True)
+
+    if ctx.open_position == open_position:
+        return ctx
+    return ctx.update(open_position=open_position)

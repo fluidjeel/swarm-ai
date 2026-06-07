@@ -4,7 +4,7 @@
 
 Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 
-**Recently closed (June 2026):** tick lock, vector memory purge, Fyers state recovery with multi-leg aggregation, Agent 1/2/3 pure Python, defensive StrategyName enum, paper-mode harness, NSE holiday integration, .cursorrules Prime Directive rewrite, prompt archive, Local Black-Scholes Greeks producer (P0 — gates paper soak strike selection): Fyers greeks field no longer required; delta/gamma computed deterministically from chain quotes. Commit: pending.
+**Recently closed (June 2026):** tick lock, vector memory purge, Fyers state recovery with multi-leg aggregation, Agent 1/2/3 pure Python, defensive StrategyName enum, paper-mode harness, NSE holiday integration, .cursorrules Prime Directive rewrite, prompt archive, Local Black-Scholes Greeks producer (P0 — gates paper soak strike selection), Strike 1 (execution fail-closed + open_position + flatten gating), Strike 2 (gatekeeper MISSING_DATA + per-leg critic delta + frozen AgentContext), Phase 4.2 scaffold (`FyersExecutionPort`, orderbook idempotency, per-tick `sync_position_from_broker`, `--broker` paper flag). Commit: pending.
 
 ---
 
@@ -20,8 +20,10 @@ Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 | ✅ | Tick-lock in production | Cross-process fcntl + DynamoDB fallback path |
 | ✅ | Defensive delete of dead strategy code | short_strangle/short_straddle/nifty_futures removed from registry, gatekeeper, exit_engine |
 | ✅ | .cursorrules Prime Directive | LLM-in-hot-path explicitly forbidden |
-| ⬜ | Hard Stop Enforcement (broker-side) | 2.5x ATR stop as native Fyers Bracket/Cover order (Phase 4.2) |
-| ⬜ | Idempotent Retries | Fyers 504 → query orderbook before retry (Phase 4.2) |
+| ⬜ | Hard Stop Enforcement (broker-side) | 2.5x ATR stop as native Fyers Bracket/Cover order (Phase 4.2+) |
+| ✅ | Idempotent order submit | `FyersExecutionPort`: orderbook pre-check by `orderTag`; 504 → re-query before single retry |
+| ✅ | `FyersExecutionPort` | `src/execution/fyers_port.py`; wired via `paper_mode --broker` |
+| ✅ | Per-tick broker position sync | `sync_position_from_broker()` in `broker_recovery.py`; `broker_sync=True` on pipeline |
 | ⬜ | Daily Fyers token rotation Lambda | Token expires 03:30 IST; needs Lambda cron (deferred per PM) |
 
 ---
@@ -50,7 +52,7 @@ Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 | ✅ | NSE holiday integration | `_weekly_expiry_timestamps` skips weekends + holidays |
 | ⬜ | **PCR momentum threshold widening** | Current `±0.02` is statistical noise; widen to `±0.10-0.15` based on paper soak data |
 | ⬜ | **VIX/ATR divergence threshold calibration** | Default 0.10; tune from paper soak |
-| ⬜ | Increase default timeout (30s → 60s) or document | Opening-hour Fyers latency |
+| ✅ | Fyers request timeout 60s in paper_mode | `FyersMarketDataProvider(request_timeout_sec=60)` |
 | ⬜ | Assert `save_pcr_snapshot` called in feature engine test | Implicit today |
 
 ---
@@ -64,7 +66,7 @@ Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 | ✅ | `LegActionIntent` for Phase-4 executor | Symbol + action + leg_id |
 | ✅ | `build_emergency_flatten_decision` | `broker_error_emergency_flatten` reason |
 | ⬜ | ExitRule StrEnum for rule_id | Same pattern as GatekeeperRule (low priority) |
-| ⬜ | Wire into live position loop | Phase 4.1 |
+| ✅ | Wire into live position loop | Flatten via `execution_port`; fill reconcile on broker_sync |
 
 ---
 
@@ -89,7 +91,7 @@ Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 |--------|------|-------|
 | ✅ | `BootLogger` for bootstrap events | `a2a_bootstrap` DDB table |
 | ✅ | `PaperLogger` for dry-run rows | JSONL files |
-| ⬜ | `TraceLogger` for per-tick rows | `a2a_traces` DDB; 5-year retention for SEBI |
+| 🟡 | `TraceLogger` for per-tick rows | JSONL default (`tick_trace.py`); DDB writer optional |
 | ⬜ | S3 Object Lock for audit immutability | DynamoDB is mutable; SEBI may require immutable audit |
 | ⬜ | CloudWatch alarm on heartbeat absence | Detect dead EC2 within 6 min |
 | ⬜ | Telegram alerter for halt events | No operator push today |
@@ -102,7 +104,7 @@ Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 |--------|------|-------|
 | ⬜ | **4h paper soak against live Fyers** | In progress; required before live |
 | ⬜ | **Capital deployment plan** | ₹2.5L Liquid BeES + ₹3.5L trading |
-| ⬜ | EC2 memory watchdog (psutil > 85% halt) | Defer until paper soak validates thresholds |
+| ✅ | EC2 memory watchdog (psutil > 85% halt) | `runtime_guards.check_memory_usage` in pipeline + paper_mode |
 | ⬜ | EC2 IAM role with SSM:GetParameter | Step 4 of the SSM migration |
 | ⬜ | Purge `~/.claude` from git history | Requires `git filter-repo` + force push to main |
 | ✅ | Rotate leaked Anthropic/opencode API key | User rotated 2026-06-06 |

@@ -5,8 +5,10 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
+from src.core.context import OpenPosition
 from src.execution.port import (
     CancelAck,
+    ExecutionFailedError,
     ExecutionPort,
     LegActionIntent,
     OrderAck,
@@ -26,6 +28,11 @@ class MockExecutionPort(ExecutionPort):
         self._seen_tags: set[str] = set()
         self._order_seq = 0
         self._health_sleep_sec = 0.0
+        self._flatten_should_fail = False
+        self.flatten_calls: list[OpenPosition] = []
+
+    def configure_flatten_failure(self, *, should_fail: bool = True) -> None:
+        self._flatten_should_fail = should_fail
 
     def configure_failure_at(self, n: int) -> None:
         """On the Nth submit_legs call, return REJECTED with SIMULATED_BROKER_ERROR."""
@@ -65,6 +72,11 @@ class MockExecutionPort(ExecutionPort):
             reason=None,
             submitted_at=datetime.now(IST),
         )
+
+    async def _flatten_position_impl(self, position: OpenPosition) -> None:
+        self.flatten_calls.append(position)
+        if self._flatten_should_fail:
+            raise ExecutionFailedError("SIMULATED_FLATTEN_FAILURE")
 
     async def cancel_order(self, order_id: str) -> CancelAck:
         return CancelAck(order_id=order_id, status="ACCEPTED")

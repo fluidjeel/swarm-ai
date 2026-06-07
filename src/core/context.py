@@ -10,9 +10,12 @@ Reference: .context/02_hldd.md §1.1
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from src.risk.gatekeeper import GatekeeperDecision
 
 SESSION_CIRCUIT_BREAKER_PNL = -8000.0
 # STALE_QUOTE_POINTS: threshold for |current_underlying - feature_snapshot_price|.
@@ -57,7 +60,12 @@ class CriticStatus(StrEnum):
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(
+        strict=True,
+        extra="forbid",
+        validate_assignment=True,
+        frozen=True,
+    )
 
 
 class OvernightContext(StrictModel):
@@ -142,6 +150,7 @@ class AgentContext(StrictModel):
         strict=True,
         extra="forbid",
         validate_assignment=True,
+        frozen=True,
         arbitrary_types_allowed=True,
     )
 
@@ -155,7 +164,7 @@ class AgentContext(StrictModel):
     regime_decision: RegimeLabel | None = None
     strategy_decision: StrategyDecision | None = None
     critic_decision: CriticDecision | None = None
-    gatekeeper_decision: Any = None
+    gatekeeper_decision: GatekeeperDecision | None = None
 
     # Risk & session state
     open_position: OpenPosition | None = None
@@ -179,6 +188,7 @@ class AgentContext(StrictModel):
         ),
     )
     data_degraded: bool = False
+    execution_halted: bool = False
     daily_pnl: float = 0.0
     circuit_status: bool = False
     dte: int = Field(default=0, ge=0, le=45)
@@ -202,8 +212,17 @@ class AgentContext(StrictModel):
 
     @property
     def is_halted(self) -> bool:
-        return self.circuit_status
+        return self.circuit_status or self.execution_halted
 
     @property
     def has_open_position(self) -> bool:
         return self.open_position is not None
+
+
+def _rebuild_agent_context_types() -> None:
+    from src.risk.gatekeeper import GatekeeperDecision as _GatekeeperDecision
+
+    AgentContext.model_rebuild(_types_namespace={"GatekeeperDecision": _GatekeeperDecision})
+
+
+_rebuild_agent_context_types()

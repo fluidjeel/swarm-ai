@@ -233,6 +233,43 @@ class EvaluateFromContextTests(unittest.TestCase):
         result = evaluate_from_context(ctx, config=self.config)
         self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.CASH_NO_TRADE)
 
+    def test_missing_vix_rejects_iron_condor_without_keyerror(self) -> None:
+        ctx = self.base_ctx.update(opening_regime=OpeningRegime(nifty_ad_ratio=1.1))
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.REJECT)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.MISSING_DATA)
+
+    def test_missing_vix_does_not_break_directional_strategy(self) -> None:
+        ctx = self.base_ctx.update(
+            opening_regime=OpeningRegime(nifty_ad_ratio=1.1),
+            strategy_decision=StrategyDecision(
+                strategy="bull_call_spread",
+                supporting_signals=["ad_ratio=1.10", "trend_up"],
+            ),
+        )
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
+
+
+class RiskGatekeeperMissingDataTests(unittest.TestCase):
+    def test_evaluate_rejects_iron_condor_when_vix_missing(self) -> None:
+        gatekeeper = RiskGatekeeper()
+        decision = gatekeeper.evaluate(
+            strategy="iron_condor",
+            feature_payload={"dte": 7},
+            daily_realized_pnl=0.0,
+        )
+        self.assertEqual(decision.rule_id, GatekeeperRule.MISSING_DATA)
+
+    def test_evaluate_approves_bull_spread_without_vix(self) -> None:
+        gatekeeper = RiskGatekeeper()
+        decision = gatekeeper.evaluate(
+            strategy="bull_call_spread",
+            feature_payload={"dte": 7},
+            daily_realized_pnl=0.0,
+        )
+        self.assertEqual(decision.verdict, GatekeeperVerdict.APPROVE)
+
 
 if __name__ == "__main__":
     unittest.main()

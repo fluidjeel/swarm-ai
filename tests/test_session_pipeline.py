@@ -15,6 +15,7 @@ from src.core.context import (
     AgentContext,
     OpenPosition,
     StrategyDecision,
+    StrategyName,
 )
 from src.agents.symbol_resolver import StrikeSelectionError, ExpirySelectionError
 from src.core.context import CriticStatus
@@ -22,6 +23,7 @@ from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChain
 from src.config.risk_config import RiskConfig
 from src.risk.gatekeeper import GatekeeperVerdict
 from src.features.feature_engine import FeatureEngineErrorCode
+from src.execution.mock_port import MockExecutionPort
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
 from src.orchestration.session_clock import IST
 from src.orchestration.tick_lock import FileTickLock, NullTickLock
@@ -677,7 +679,9 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         ctx = AgentContext(session_id="pipeline-dry-run-01", dte=3)
         result = await pipeline.run_tick(ctx)
 
-        self.assertIsNone(result.ctx.open_position)
+        self.assertIsNotNone(result.ctx.open_position)
+        self.assertEqual(result.ctx.open_position.strategy, StrategyName.IRON_CONDOR)
+        self.assertEqual(len(result.ctx.open_position.legs or []), 4)
         self.assertIn("PAPER_APPROVE", [row["event"] for row in rows])
         self.assertEqual(result.ctx.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
 
@@ -714,12 +718,48 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(paper_rows_after_second), 1)
 
-    async def test_run_tick_dry_run_does_not_call_evaluate_exit_when_flat(self) -> None:
+    async def test_run_tick_dry_run_execution_failure_halts_session(self) -> None:
+        port = MockExecutionPort()
+        port.configure_failure_at(1)
         pipeline = SessionPipeline(
             _EntryChainProvider(),
+            execution_port=port,
             tick_lock=NullTickLock(),
             dry_run=True,
         )
+        ctx = AgentContext(session_id="pipeline-exec-fail-01", dte=3)
+        result = await pipeline.run_tick(ctx)
+
+        self.assertTrue(result.ctx.execution_halted)
+        self.assertIsNone(result.ctx.open_position)
+
+    async def test_run_tick_exit_flatten_failure_retains_open_position(self) -> None:
+        port = MockExecutionPort()
+        port.configure_flatten_failure()
+        short_leg = "NSE:NIFTY24JUN24100PE"
+        provider = _MultiLegQuoteProvider(
+            ask_by_symbol={short_leg: 40.0},
+            default_ask=80.0,
+        )
+        pipeline = SessionPipeline(
+            provider,
+            execution_port=port,
+            tick_lock=NullTickLock(),
+            dry_run=True,
+            session_open_vix=14.0,
+        )
+        ctx = AgentContext(
+            session_id="pipeline-flatten-fail-01",
+            open_position=_iron_condor_open_position(),
+        )
+        result = await pipeline.run_tick(ctx)
+
+        self.assertIsNotNone(result.ctx.open_position)
+        self.assertTrue(result.ctx.execution_halted)
+        self.assertEqual(len(port.flatten_calls), 1)
+
+    async def test_run_tick_does_not_call_evaluate_exit_when_flat(self) -> None:
+        pipeline = SessionPipeline(_FakeProvider(), tick_lock=NullTickLock())
         ctx = AgentContext(session_id="pipeline-dry-run-02", dte=3)
 
         with patch.object(pipeline, "_evaluate_exit", new_callable=AsyncMock) as mock_exit:
