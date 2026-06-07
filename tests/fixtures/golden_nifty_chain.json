@@ -1,0 +1,13 @@
+{
+  "spot": 18250.5,
+  "strike": 18200,
+  "option_type": "CE",
+  "ltp": 125.3,
+  "bid": 124.8,
+  "ask": 125.8,
+  "oi": 15420,
+  "dte_days": 2,
+  "r": 0.065,
+  "q": 0.0,
+  "nse_delta": null
+}

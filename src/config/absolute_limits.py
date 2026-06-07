@@ -30,6 +30,10 @@ class AbsoluteLimits(BaseModel):
     max_dte_for_entry: tuple[int, int, str] = (0, 21, "Max DTE for entry")
     min_dte_for_entry: tuple[int, int, str] = (0, 14, "Min DTE for entry")
     wing_width_points: tuple[int, int, str] = (100, 500, "Wing width band")
+    risk_free_rate: tuple[float, float, str] = (0.0, 0.20, "outside RBI plausible range 0%-20%")
+    dividend_yield: tuple[float, float, str] = (0.0, 0.10, "implausible index yield > 10%")
+    iv_solver_max_iter: tuple[int, int, str] = (1, 200, "Newton-Raphson budget")
+    iv_tolerance: tuple[float, float, str] = (1e-9, 1e-2, "BSM solver precision")
 
 
 ABSOLUTE_LIMITS = AbsoluteLimits()

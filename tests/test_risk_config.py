@@ -49,10 +49,49 @@ class RiskConfigTests(unittest.TestCase):
     def test_clamp_to_absolute_no_change(self) -> None:
         self.assertEqual(clamp_to_absolute("max_spread_pct", 0.05), 0.05)
 
-    def test_absolute_limits_has_bounds_for_all_keys(self) -> None:
+    def test_absolute_limits_has_bounds_for_numeric_keys(self) -> None:
+        enum_only = {"greeks_price_side"}
         for key in RiskConfig.model_fields:
+            if key in enum_only:
+                continue
             bounds = getattr(ABSOLUTE_LIMITS, key)
             self.assertEqual(len(bounds), 3)
+
+    def test_greeks_config_defaults(self) -> None:
+        config = RiskConfig()
+        self.assertEqual(config.risk_free_rate, 0.065)
+        self.assertEqual(config.dividend_yield, 0.0)
+        self.assertEqual(config.greeks_price_side, "mid")
+        self.assertEqual(config.iv_solver_max_iter, 50)
+        self.assertEqual(config.iv_tolerance, 1e-5)
+
+    def test_load_greeks_fields_from_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "risk_config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "risk_free_rate": 0.07,
+                        "dividend_yield": 0.01,
+                        "greeks_price_side": "ask",
+                        "iv_solver_max_iter": 40,
+                        "iv_tolerance": 1e-4,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_risk_config(path)
+        self.assertEqual(config.risk_free_rate, 0.07)
+        self.assertEqual(config.dividend_yield, 0.01)
+        self.assertEqual(config.greeks_price_side, "ask")
+        self.assertEqual(config.iv_solver_max_iter, 40)
+        self.assertEqual(config.iv_tolerance, 1e-4)
+
+    def test_clamp_greeks_numeric_fields(self) -> None:
+        self.assertEqual(clamp_to_absolute("risk_free_rate", 0.50), 0.20)
+        self.assertEqual(clamp_to_absolute("dividend_yield", 0.15), 0.10)
+        self.assertEqual(clamp_to_absolute("iv_solver_max_iter", 500), 200)
+        self.assertEqual(clamp_to_absolute("iv_tolerance", 1e-12), 1e-9)
 
     def test_strike_selection_defaults(self) -> None:
         config = RiskConfig()

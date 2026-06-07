@@ -209,9 +209,12 @@ class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):
                             "symbol": "NSE:NIFTY24JUN25000CE",
                             "option_type": "CE",
                             "strike_price": 25000,
+                            "ltp": 120.0,
+                            "bid": 118.0,
+                            "ask": 122.0,
+                            "oi": 5000,
                             "delta": 0.31,
                             "gamma": 0.01,
-                            "confidence": "high",
                         }
                     ]
                 },
@@ -219,7 +222,10 @@ class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):
 
         mock_client = MagicMock()
         mock_client.optionchain.side_effect = _optionchain
-        with patch.object(provider, "_get_client", return_value=mock_client):
+        with (
+            patch.object(provider, "_get_client", return_value=mock_client),
+            patch.object(provider, "get_index_ltp", return_value=25050.0),
+        ):
             greeks = await provider.get_option_chain_greeks(
                 "NSE:NIFTY50-INDEX",
                 expiry_ts,
@@ -228,6 +234,8 @@ class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured_payload["timestamp"], str(expiry_ts))
         self.assertEqual(len(greeks), 1)
         self.assertEqual(greeks[0].symbol, "NSE:NIFTY24JUN25000CE")
+        self.assertIsNotNone(greeks[0].delta)
+        self.assertIsNotNone(greeks[0].gamma)
 
 
 if __name__ == "__main__":

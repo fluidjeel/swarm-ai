@@ -54,6 +54,21 @@ class Quote:
 
 
 @dataclass(frozen=True, slots=True)
+class OptionQuote:
+    """Raw option chain quote before local Greeks enrichment."""
+
+    symbol: str
+    strike: float
+    option_type: str
+    bid: float | None
+    ask: float | None
+    ltp: float
+    oi: int | None
+    broker_delta: float | None = None
+    broker_gamma: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OptionGreeks:
     """Greeks for a single option strike."""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +32,11 @@ class RiskConfig(BaseModel):
     max_dte_for_entry: int = Field(default=7, ge=0, le=45)
     min_dte_for_entry: int = Field(default=1, ge=0, le=45)
     wing_width_points: int = Field(default=200, ge=50, le=1000)
+    risk_free_rate: float = Field(default=0.065, ge=0.0, le=0.20)
+    dividend_yield: float = Field(default=0.0, ge=0.0, le=0.10)
+    greeks_price_side: Literal["mid", "ask"] = "mid"
+    iv_solver_max_iter: int = Field(default=50, ge=1, le=200)
+    iv_tolerance: float = Field(default=1e-5, ge=1e-9, le=1e-2)
 
 
 def load_risk_config(path: Path | None = None) -> RiskConfig:

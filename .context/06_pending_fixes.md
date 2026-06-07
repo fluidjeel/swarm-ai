@@ -4,7 +4,7 @@
 
 Tracked from MiniMax review, Safety Audit, and Phase 0-4 close-out.
 
-**Recently closed (June 2026):** tick lock, vector memory purge, Fyers state recovery with multi-leg aggregation, Agent 1/2/3 pure Python, defensive StrategyName enum, paper-mode harness, NSE holiday integration, .cursorrules Prime Directive rewrite, prompt archive.
+**Recently closed (June 2026):** tick lock, vector memory purge, Fyers state recovery with multi-leg aggregation, Agent 1/2/3 pure Python, defensive StrategyName enum, paper-mode harness, NSE holiday integration, .cursorrules Prime Directive rewrite, prompt archive, Local Black-Scholes Greeks producer (P0 — gates paper soak strike selection): Fyers greeks field no longer required; delta/gamma computed deterministically from chain quotes. Commit: pending.
 
 ---
 

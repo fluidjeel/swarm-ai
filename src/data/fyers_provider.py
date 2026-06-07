@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TypeVar
 
+from src.config.risk_config import RiskConfig, load_risk_config
 from src.core.context import OpenPosition
 from src.data.base_provider import (
     BreadthSnapshot,
@@ -18,10 +21,15 @@ from src.data.base_provider import (
     OhlcvBar,
     OptionChainPcr,
     OptionGreeks,
+    OptionQuote,
     Quote,
     UntaggedPositionError,
 )
 from src.data.nifty50_symbols import load_nifty50_symbols
+from src.features.greeks_engine import compute_greeks_from_market
+from src.features.math_utils import compute_dte_from_expiry_timestamp
+
+logger = logging.getLogger("a2a.fyers_provider")
 
 T = TypeVar("T")
 
@@ -519,12 +527,32 @@ def _parse_bid_ask(response: dict[str, Any], symbol: str) -> Quote:
     raise MarketDataError(f"Could not parse bid/ask for {symbol} from Fyers quotes.")
 
 
-def _parse_option_chain_greeks(
+def _parse_positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0.0 else None
+
+
+def _parse_finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _parse_option_chain_quotes(
     response: dict[str, Any],
     *,
     symbol: str,
     expiry_ts: int,
-) -> list[OptionGreeks]:
+) -> list[OptionQuote]:
     data = response.get("data")
     if not isinstance(data, dict):
         raise MarketDataError("Fyers option chain response missing 'data' object.")
@@ -533,7 +561,7 @@ def _parse_option_chain_greeks(
     if not isinstance(chain, list) or not chain:
         raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
 
-    greeks: list[OptionGreeks] = []
+    quotes: list[OptionQuote] = []
     for row in chain:
         if not isinstance(row, dict):
             continue
@@ -543,56 +571,102 @@ def _parse_option_chain_greeks(
             continue
 
         strike_raw = row.get("strike_price", row.get("strike"))
-        delta_raw = row.get("delta")
-        gamma_raw = row.get("gamma")
-        if strike_raw is None or delta_raw is None or gamma_raw is None:
+        if strike_raw is None:
             continue
 
         try:
             strike = float(strike_raw)
-            delta = float(delta_raw)
-            gamma = float(gamma_raw)
         except (TypeError, ValueError):
             continue
 
-        oi_raw = row.get("oi", 0)
+        bid = _parse_positive_float(row.get("bid"))
+        ask = _parse_positive_float(row.get("ask"))
+        ltp_raw = row.get("ltp", row.get("last_price"))
+        ltp = _parse_positive_float(ltp_raw)
+        if ltp is None and bid is not None and ask is not None:
+            ltp = (bid + ask) / 2.0
+        if ltp is None or ltp <= 0.0:
+            continue
+
+        oi_raw = row.get("oi")
+        oi: int | None
         try:
-            oi = int(oi_raw)
+            oi = int(oi_raw) if oi_raw is not None else None
         except (TypeError, ValueError):
-            oi = 0
+            oi = None
 
-        bid = row.get("bid")
-        ask = row.get("ask")
-        confidence = "high"
-        if oi < 100:
-            confidence = "low"
-        elif bid is not None and ask is not None:
-            try:
-                bid_f = float(bid)
-                ask_f = float(ask)
-                ltp_raw = row.get("ltp", row.get("last_price"))
-                ltp_f = float(ltp_raw) if ltp_raw is not None else (bid_f + ask_f) / 2
-                if ltp_f > 0 and (ask_f - bid_f) / ltp_f > 0.10:
-                    confidence = "low"
-            except (TypeError, ValueError):
-                confidence = "low"
-
+        broker_delta = _parse_finite_float(row.get("delta"))
+        broker_gamma = _parse_finite_float(row.get("gamma"))
         option_symbol = str(row.get("symbol", f"{symbol}:{strike}:{option_type}"))
-        greeks.append(
-            OptionGreeks(
+        quotes.append(
+            OptionQuote(
                 symbol=option_symbol,
                 strike=strike,
                 option_type=option_type,
-                delta=delta,
-                gamma=gamma,
-                confidence=confidence,
+                bid=bid,
+                ask=ask,
+                ltp=ltp,
+                oi=oi,
+                broker_delta=broker_delta,
+                broker_gamma=broker_gamma,
             )
         )
 
-    if not greeks:
+    if not quotes:
         raise MarketDataError(
-            f"Fyers option chain returned no greeks for {symbol} expiry {expiry_ts}."
+            f"Fyers option chain returned no quotes for {symbol} expiry {expiry_ts}."
         )
+    return quotes
+
+
+def _enrich_with_local_greeks(
+    quotes: list[OptionQuote],
+    *,
+    spot: float,
+    expiry_ts: int,
+    config: RiskConfig,
+) -> list[OptionGreeks]:
+    dte_days = compute_dte_from_expiry_timestamp(expiry_ts)
+    greeks: list[OptionGreeks] = []
+
+    for quote in quotes:
+        market = compute_greeks_from_market(
+            spot=spot,
+            strike=quote.strike,
+            dte_days=dte_days,
+            r=config.risk_free_rate,
+            q=config.dividend_yield,
+            option_ltp=quote.ltp,
+            bid=quote.bid,
+            ask=quote.ask,
+            oi=quote.oi,
+            is_call=quote.option_type == "CE",
+            price_side=config.greeks_price_side,
+            iv_max_iter=config.iv_solver_max_iter,
+            iv_tol=config.iv_tolerance,
+        )
+        if quote.broker_delta is not None and quote.broker_gamma is not None:
+            logger.debug(
+                "greeks_compare symbol=%s local_delta=%.4f broker_delta=%.4f "
+                "local_gamma=%.6f broker_gamma=%.6f iv=%s",
+                quote.symbol,
+                market.delta,
+                quote.broker_delta,
+                market.gamma,
+                quote.broker_gamma,
+                market.iv,
+            )
+        greeks.append(
+            OptionGreeks(
+                symbol=quote.symbol,
+                strike=quote.strike,
+                option_type=quote.option_type,
+                delta=market.delta,
+                gamma=market.gamma,
+                confidence=market.confidence,
+            )
+        )
+
     return greeks
 
 
@@ -780,17 +854,25 @@ class FyersMarketDataProvider(MarketDataProvider):
             "timestamp": str(expiry_ts),
         }
 
-        def _fetch() -> list[OptionGreeks]:
+        def _fetch_chain() -> dict[str, Any]:
             client = self._get_client()
-            response = _assert_fyers_ok(
+            return _assert_fyers_ok(
                 client.optionchain(payload),
                 context=f"optionchain_greeks({symbol})",
             )
-            return _parse_option_chain_greeks(response, symbol=symbol, expiry_ts=expiry_ts)
 
-        return await self._call_with_timeout(
-            _fetch,
+        response = await self._call_with_timeout(
+            _fetch_chain,
             context=f"get_option_chain_greeks({symbol})",
+        )
+        quotes = _parse_option_chain_quotes(response, symbol=symbol, expiry_ts=expiry_ts)
+        spot = await self.get_index_ltp(symbol)
+        config = load_risk_config()
+        return _enrich_with_local_greeks(
+            quotes,
+            spot=spot,
+            expiry_ts=expiry_ts,
+            config=config,
         )
 
     async def get_bid_ask(self, symbol: str) -> Quote:
