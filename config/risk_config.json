@@ -16,5 +16,10 @@
   "delta_tolerance": 0.10,
   "max_dte_for_entry": 7,
   "min_dte_for_entry": 1,
-  "wing_width_points": 200
+  "wing_width_points": 200,
+  "risk_free_rate": 0.065,
+  "dividend_yield": 0.0,
+  "greeks_price_side": "mid",
+  "iv_solver_max_iter": 50,
+  "iv_tolerance": 1e-5
 }

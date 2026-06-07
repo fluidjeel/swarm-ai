@@ -34,7 +34,7 @@ class RiskConfig(BaseModel):
     wing_width_points: int = Field(default=200, ge=50, le=1000)
     risk_free_rate: float = Field(default=0.065, ge=0.0, le=0.20)
     dividend_yield: float = Field(default=0.0, ge=0.0, le=0.10)
-    greeks_price_side: Literal["mid", "ask"] = "mid"
+    greeks_price_side: Literal["mid", "ask"] = Field(default="mid")
     iv_solver_max_iter: int = Field(default=50, ge=1, le=200)
     iv_tolerance: float = Field(default=1e-5, ge=1e-9, le=1e-2)
 

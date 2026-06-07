@@ -691,6 +691,10 @@ class FyersMarketDataProvider(MarketDataProvider):
         self._vix_symbol = vix_symbol
         self._log_path = log_path
         self._client: Any | None = None
+        self._risk_config: RiskConfig | None = None
+
+    def bind_risk_config(self, config: RiskConfig) -> None:
+        self._risk_config = config
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -867,7 +871,7 @@ class FyersMarketDataProvider(MarketDataProvider):
         )
         quotes = _parse_option_chain_quotes(response, symbol=symbol, expiry_ts=expiry_ts)
         spot = await self.get_index_ltp(symbol)
-        config = load_risk_config()
+        config = self._risk_config or load_risk_config()
         return _enrich_with_local_greeks(
             quotes,
             spot=spot,

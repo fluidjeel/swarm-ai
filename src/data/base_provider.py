@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
+from src.config.risk_config import RiskConfig
+
 if TYPE_CHECKING:
     from src.core.context import OpenPosition
 
@@ -98,6 +100,9 @@ class MarketDataTimeoutError(MarketDataError):
 
 class MarketDataProvider(ABC):
     """Async interface for index, volatility, and option-chain market data."""
+
+    def bind_risk_config(self, config: RiskConfig) -> None:
+        """Optional hook: providers that enrich greeks should override."""
 
     @abstractmethod
     async def get_index_ltp(self, symbol: str) -> float:

@@ -275,6 +275,19 @@ def compute_greeks_from_market(
     iv_max_iter: int = IV_SOLVER_MAX_ITER,
     iv_tol: float = IV_SOLVER_TOL,
 ) -> MarketGreeks:
+    if spot <= 0.0 or strike <= 0.0 or option_ltp <= 0.0:
+        return MarketGreeks(
+            delta=0.0,
+            gamma=0.0,
+            theta=None,
+            vega=None,
+            iv=None,
+            confidence="low",
+            mid_price=max(option_ltp, 0.0),
+            spread_pct=float("inf"),
+            oi=oi,
+        )
+
     t_years = max(dte_days / 365.25, 1e-5)
     mid = _mid_or_ltp(bid, ask, option_ltp)
     spread = _spread_pct(bid, ask, mid)

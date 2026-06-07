@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from src.data.base_provider import UntaggedPositionError
+from src.config.risk_config import RiskConfig
 from src.data.fyers_provider import (
     FyersMarketDataProvider,
     _parse_breadth_from_quotes,
@@ -191,6 +192,14 @@ class FyersPositionInferenceTests(unittest.TestCase):
         }
         with self.assertRaises(UntaggedPositionError):
             _parse_positions(response)
+
+
+class FyersRiskConfigBindingTests(unittest.TestCase):
+    def test_bind_risk_config_used_by_enrich(self) -> None:
+        provider = FyersMarketDataProvider(app_id="test-app", access_token="token")
+        custom = RiskConfig(risk_free_rate=0.10, iv_solver_max_iter=10)
+        provider.bind_risk_config(custom)
+        self.assertIs(provider._risk_config, custom)
 
 
 class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):

@@ -114,6 +114,9 @@ class SessionPipeline:
         self._exit_engine = exit_engine or ExitEngine()
         self._execution_port = execution_port or NoOpExecutionPort()
         self._risk_config = risk_config or load_risk_config()
+        bind_risk = getattr(self._provider, "bind_risk_config", None)
+        if callable(bind_risk):
+            bind_risk(self._risk_config)
         self._request_timeout_sec = request_timeout_sec
         self._pcr_history_path = pcr_history_path
         self._nifty_symbol = nifty_symbol
