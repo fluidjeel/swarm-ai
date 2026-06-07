@@ -111,7 +111,17 @@ class AgentContext(StrictModel):
     feature_snapshot_price: float | None = Field(
         default=None,
         gt=0.0,
-        description="NIFTY LTP at feature capture; used for stale-quote aborts.",
+        description=(
+            "NIFTY LTP at feature capture; used for stale-quote aborts. "
+            "Paired with baseline_initialized — Agent 3 rejects ticks when baseline is unset."
+        ),
+    )
+    baseline_initialized: bool = Field(
+        default=False,
+        description=(
+            "Set True after first successful snapshot capture. "
+            "Required by Agent 3 to avoid stale-quote abort on first tick."
+        ),
     )
     data_degraded: bool = False
     daily_pnl: float = 0.0

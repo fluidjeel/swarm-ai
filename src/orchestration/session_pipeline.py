@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from src.core.context import AgentContext
-from src.data.base_provider import MarketDataProvider, OhlcvBar
+from src.data.base_provider import FyersAuthError, MarketDataError, MarketDataProvider, OhlcvBar
 from src.features.feature_engine import (
     FeatureEngineError,
     FeatureEngineErrorCode,
@@ -137,6 +137,27 @@ class SessionPipeline:
                 )
             raise
 
+        # Baseline from broker LTP at boot — not the next 5-min bar close.
+        # If LTP fetch fails, boot continues; first tick will retry baseline init.
+        try:
+            ltp = await self._provider.get_index_ltp(self._nifty_symbol)
+            ctx = ctx.update(
+                feature_snapshot_price=float(ltp),
+                baseline_initialized=True,
+            )
+        except (MarketDataError, FyersAuthError) as exc:
+            if writer is not None:
+                writer.log_boot_row(
+                    {
+                        "event": "session_bootstrap",
+                        "session_id": ctx.session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "phase_allowed": True,
+                        "outcome": "baseline_init_failed",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+
         if writer is not None:
             writer.log_boot_row(
                 {
@@ -149,6 +170,8 @@ class SessionPipeline:
                         ctx.open_position.symbol if ctx.open_position else None
                     ),
                     "has_open_position": ctx.has_open_position,
+                    "baseline_initialized": ctx.baseline_initialized,
+                    "feature_snapshot_price": ctx.feature_snapshot_price,
                 }
             )
 
@@ -232,6 +255,19 @@ class SessionPipeline:
 
         snapshot_price = float(bars[-1]["close"])
         captured_at = datetime.now(timezone.utc).isoformat()
+
+        if not ctx.baseline_initialized:
+            ctx = ctx.update(baseline_initialized=True)
+            if self._boot_logger is not None:
+                self._boot_logger.log_boot_row(
+                    {
+                        "event": "first_tick_baseline",
+                        "session_id": ctx.session_id,
+                        "timestamp": captured_at,
+                        "feature_snapshot_price": snapshot_price,
+                    }
+                )
+
         return apply_feature_payload(
             ctx,
             payload,

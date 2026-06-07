@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from src.core.context import (
     SESSION_CIRCUIT_BREAKER_PNL,
@@ -15,6 +16,7 @@ from src.core.context import (
 from src.data.base_provider import BreadthSnapshot, MarketDataError, OptionChainPcr, OptionGreeks, Quote
 from src.features.feature_engine import FeatureEngineErrorCode
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
+from src.orchestration.session_clock import IST
 from src.orchestration.tick_lock import FileTickLock, NullTickLock
 from src.risk.exit_engine import (
     CreditSpreadPosition,
@@ -24,6 +26,15 @@ from src.risk.exit_engine import (
 
 
 class _FakeProvider:
+    def __init__(self, *, index_ltp: float = 24850.5, ltp_error: Exception | None = None) -> None:
+        self._index_ltp = index_ltp
+        self._ltp_error = ltp_error
+
+    async def get_index_ltp(self, symbol: str) -> float:
+        if self._ltp_error is not None:
+            raise self._ltp_error
+        return self._index_ltp
+
     async def get_vix(self) -> float:
         return 14.5
 
@@ -102,6 +113,7 @@ class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result.ctx.dte, 0)
         self.assertIsNotNone(result.ctx.opening_regime.captured_at_iso)
         self.assertEqual(result.ctx.feature_snapshot_price, 102.0)
+        self.assertTrue(result.ctx.baseline_initialized)
         self.assertFalse(result.ctx.data_degraded)
 
     async def test_run_tick_halted_without_position_still_refreshes(self) -> None:
@@ -249,6 +261,84 @@ class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(SessionPipelineError):
             await pipeline.run_tick(ctx)
+
+
+def _intraday_ist() -> datetime:
+    return datetime(2026, 6, 9, 10, 0, tzinfo=IST)
+
+
+class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bootstrap_initializes_baseline_from_ltp(self) -> None:
+        boot_rows: list[dict] = []
+
+        class _Writer:
+            def log_boot_row(self, row: dict) -> None:
+                boot_rows.append(row)
+
+        provider = _FakeProvider(index_ltp=24850.5)
+        pipeline = SessionPipeline(provider, tick_lock=NullTickLock(), boot_logger=_Writer())
+        ctx = AgentContext(session_id="bootstrap-baseline-01")
+
+        with patch(
+            "src.orchestration.session_pipeline.rebuild_from_fyers",
+            new_callable=AsyncMock,
+        ) as mock_rebuild:
+            mock_rebuild.return_value = ctx
+            result = await pipeline.bootstrap_session(ctx, now_ist=_intraday_ist())
+
+        self.assertTrue(result.baseline_initialized)
+        self.assertEqual(result.feature_snapshot_price, 24850.5)
+        success_rows = [row for row in boot_rows if row.get("outcome") == "bootstrap_success"]
+        self.assertEqual(len(success_rows), 1)
+        self.assertTrue(success_rows[0]["baseline_initialized"])
+
+    async def test_bootstrap_continues_when_ltp_provider_fails(self) -> None:
+        boot_rows: list[dict] = []
+
+        class _Writer:
+            def log_boot_row(self, row: dict) -> None:
+                boot_rows.append(row)
+
+        provider = _FakeProvider(ltp_error=MarketDataError("ltp unavailable"))
+        pipeline = SessionPipeline(provider, tick_lock=NullTickLock(), boot_logger=_Writer())
+        ctx = AgentContext(session_id="bootstrap-baseline-02")
+
+        with patch(
+            "src.orchestration.session_pipeline.rebuild_from_fyers",
+            new_callable=AsyncMock,
+        ) as mock_rebuild:
+            mock_rebuild.return_value = ctx
+            result = await pipeline.bootstrap_session(ctx, now_ist=_intraday_ist())
+
+        self.assertFalse(result.baseline_initialized)
+        self.assertIsNone(result.feature_snapshot_price)
+        failed_rows = [row for row in boot_rows if row.get("outcome") == "baseline_init_failed"]
+        self.assertEqual(len(failed_rows), 1)
+
+    async def test_first_tick_after_bootstrap_does_not_overwrite_baseline_unnecessarily(self) -> None:
+        provider = _FakeProvider(index_ltp=24850.5)
+        pipeline = SessionPipeline(provider, tick_lock=NullTickLock())
+        ctx = AgentContext(session_id="bootstrap-baseline-03")
+
+        with patch(
+            "src.orchestration.session_pipeline.rebuild_from_fyers",
+            new_callable=AsyncMock,
+        ) as mock_rebuild:
+            mock_rebuild.return_value = ctx
+            ctx = await pipeline.bootstrap_session(ctx, now_ist=_intraday_ist())
+
+        self.assertEqual(ctx.feature_snapshot_price, 24850.5)
+        result = await pipeline.run_tick(ctx)
+        self.assertTrue(result.ctx.baseline_initialized)
+        self.assertEqual(result.ctx.feature_snapshot_price, 102.0)
+
+    async def test_run_tick_initializes_baseline_when_not_set(self) -> None:
+        pipeline = SessionPipeline(_FakeProvider(), tick_lock=NullTickLock())
+        ctx = AgentContext(session_id="bootstrap-baseline-04")
+        result = await pipeline.run_tick(ctx)
+
+        self.assertTrue(result.ctx.baseline_initialized)
+        self.assertEqual(result.ctx.feature_snapshot_price, 102.0)
 
 
 if __name__ == "__main__":

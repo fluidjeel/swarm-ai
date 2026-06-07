@@ -85,6 +85,10 @@ class MarketDataProvider(ABC):
     """Async interface for index, volatility, and option-chain market data."""
 
     @abstractmethod
+    async def get_index_ltp(self, symbol: str) -> float:
+        """Return the current last-traded price for an index symbol."""
+
+    @abstractmethod
     async def get_index_ohlcv(
         self,
         symbol: str,

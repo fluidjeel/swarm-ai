@@ -680,6 +680,19 @@ class FyersMarketDataProvider(MarketDataProvider):
 
         return await self._call_with_timeout(_fetch, context=f"get_index_ohlcv({symbol})")
 
+    async def get_index_ltp(self, symbol: str) -> float:
+        payload = {"symbols": symbol}
+
+        def _fetch() -> float:
+            client = self._get_client()
+            response = _assert_fyers_ok(
+                client.quotes(payload),
+                context=f"quotes({symbol})",
+            )
+            return _extract_quote_last_price(response, symbol)
+
+        return await self._call_with_timeout(_fetch, context=f"get_index_ltp({symbol})")
+
     async def get_vix(self) -> float:
         payload = {"symbols": self._vix_symbol}
 

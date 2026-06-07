@@ -18,6 +18,9 @@ from src.features.feature_engine import (
 
 
 class _FakeProvider:
+    async def get_index_ltp(self, symbol: str) -> float:
+        return 24850.5
+
     async def get_vix(self) -> float:
         return 14.5
 

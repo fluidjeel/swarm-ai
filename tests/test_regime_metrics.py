@@ -13,6 +13,9 @@ class _FakeProvider:
     def __init__(self, *, fail_vix: bool = False) -> None:
         self.fail_vix = fail_vix
 
+    async def get_index_ltp(self, symbol: str) -> float:
+        return 24850.5
+
     async def get_vix(self) -> float:
         if self.fail_vix:
             raise RuntimeError("vix down")

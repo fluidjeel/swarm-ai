@@ -34,6 +34,9 @@ class _FakeProvider:
         self._positions = positions if positions is not None else []
         self._fail_with = fail_with
 
+    async def get_index_ltp(self, symbol: str) -> float:
+        return 24850.5
+
     async def get_vix(self) -> float:
         return 14.5
 
@@ -388,6 +391,29 @@ class BootstrapSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.open_position.legs), 4)
         self.assertEqual(result.open_position.strategy, "iron_condor")
         self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
+
+    async def test_bootstrap_logs_baseline_init_failure(self) -> None:
+        boot = _RecordingBootLogger()
+
+        class _FailingLtpProvider(_FakeProvider):
+            async def get_index_ltp(self, symbol: str) -> float:
+                raise MarketDataError("ltp unavailable")
+
+        pipeline = SessionPipeline(_FailingLtpProvider(), boot_logger=boot)
+        ctx = AgentContext(session_id="bootstrap-baseline-fail")
+        intraday = _ist(2026, 6, 9, 10, 0)
+
+        with patch(
+            "src.orchestration.session_pipeline.rebuild_from_fyers",
+            new_callable=AsyncMock,
+        ) as mock_rebuild:
+            mock_rebuild.return_value = ctx
+            result = await pipeline.bootstrap_session(ctx, now_ist=intraday, boot_writer=boot)
+
+        self.assertFalse(result.baseline_initialized)
+        failed_rows = [row for row in boot.rows if row.get("outcome") == "baseline_init_failed"]
+        self.assertEqual(len(failed_rows), 1)
+        self.assertIn("MarketDataError", failed_rows[0]["detail"])
 
     async def test_bootstrap_session_calls_recovery(self) -> None:
         position = OpenPosition(
