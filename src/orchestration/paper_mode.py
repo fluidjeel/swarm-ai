@@ -643,12 +643,11 @@ class MultiIndexPaperSoakRunner:
                         self.request_stop()
                         break
 
-                await asyncio.gather(
-                    *[
-                        self._run_lane_tick(lane, now=now, memory_pct=memory_pct)
-                        for lane in self._lanes
-                    ]
-                )
+                # Sequential lane ticks to avoid Fyers 429 bursts (shared VIX/breadth fetches).
+                for lane in self._lanes:
+                    if self._stop:
+                        break
+                    await self._run_lane_tick(lane, now=now, memory_pct=memory_pct)
                 await self._sleep(self._tick_seconds)
         finally:
             for lane in self._lanes:
