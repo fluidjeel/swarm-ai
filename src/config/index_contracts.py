@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.config.risk_config import RiskConfig
+
 
 class ExpirySchedule(str, Enum):
     NIFTY_WEEKLY = "nifty_weekly"  # Thursday before 2025-09-01, Tuesday after
@@ -25,6 +30,10 @@ class IndexContract:
     lot_size: int
     schedule: ExpirySchedule
     display_name: str
+    min_dte_for_entry: int | None = None
+    max_dte_for_entry: int | None = None
+    wing_width_points: int | None = None
+    stale_quote_points: float | None = None
 
 
 _INDEX_REGISTRY: dict[str, IndexContract] = {
@@ -48,6 +57,10 @@ _INDEX_REGISTRY: dict[str, IndexContract] = {
         lot_size=15,
         schedule=ExpirySchedule.MONTHLY_LAST_TUESDAY,
         display_name="BANK NIFTY",
+        min_dte_for_entry=7,
+        max_dte_for_entry=21,
+        wing_width_points=500,
+        stale_quote_points=50.0,
     ),
 }
 
@@ -78,6 +91,28 @@ def resolve_index_contract(name_or_symbol: str) -> IndexContract:
         f"Unsupported index contract {name_or_symbol!r}. "
         f"Choose one of: {', '.join(list_index_keys())}, or a full Fyers index symbol."
     )
+
+
+def risk_config_for_contract(
+    contract: IndexContract,
+    base: "RiskConfig | None" = None,
+) -> "RiskConfig":
+    """Merge per-index soak/execution overrides onto the shared risk config."""
+    from src.config.risk_config import load_risk_config
+
+    resolved = base or load_risk_config()
+    updates: dict[str, int | float] = {}
+    if contract.min_dte_for_entry is not None:
+        updates["min_dte_for_entry"] = contract.min_dte_for_entry
+    if contract.max_dte_for_entry is not None:
+        updates["max_dte_for_entry"] = contract.max_dte_for_entry
+    if contract.wing_width_points is not None:
+        updates["wing_width_points"] = contract.wing_width_points
+    if contract.stale_quote_points is not None:
+        updates["stale_quote_points"] = contract.stale_quote_points
+    if not updates:
+        return resolved
+    return resolved.model_copy(update=updates)
 
 
 def weekly_expiry_weekday(contract: IndexContract, *, on_date: date) -> int:

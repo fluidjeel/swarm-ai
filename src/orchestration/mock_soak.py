@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.config.index_contracts import resolve_index_contract
-from src.config.risk_config import RiskConfig
+from src.config.index_contracts import resolve_index_contract, risk_config_for_contract
+from src.config.risk_config import RiskConfig, load_risk_config
 from src.core.context import AgentContext, OpenPosition
 from src.data.base_provider import BreadthSnapshot, MarketDataProvider, OptionChainPcr, OptionGreeks, Quote
 from src.execution.mock_port import MockExecutionPort
@@ -130,9 +130,11 @@ def build_mock_runner(
     provider: MarketDataProvider = MockMarketDataProvider()  # type: ignore[assignment]
     execution_port = MockExecutionPort() if exercise_broker else NoOpExecutionPort()
     index_contract = resolve_index_contract(index_symbol or "nifty")
+    risk_config = risk_config_for_contract(index_contract, load_risk_config())
     pipeline = SessionPipeline(
         provider,
         index_symbol=index_contract.symbol,
+        risk_config=risk_config,
         tick_lock=NullTickLock(),
         dry_run=True,
         paper_logger=paper_logger,

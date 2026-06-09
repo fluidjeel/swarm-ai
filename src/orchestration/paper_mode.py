@@ -16,7 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from src.config.index_contracts import IndexContract, resolve_index_contract
+from src.config.index_contracts import IndexContract, resolve_index_contract, risk_config_for_contract
+from src.config.risk_config import load_risk_config
 from src.config.secrets import get_fyers_credentials, load_project_env
 from src.core.context import AgentContext, CriticStatus
 from src.data.fyers_provider import FyersMarketDataProvider
@@ -506,9 +507,11 @@ class PaperSoakRunner:
         )
         index_key = (index_symbol or os.getenv("PAPER_INDEX", "nifty")).strip()
         index_contract = resolve_index_contract(index_key)
+        risk_config = risk_config_for_contract(index_contract, load_risk_config())
         pipeline = SessionPipeline(
             provider,
             index_symbol=index_contract.symbol,
+            risk_config=risk_config,
             tick_lock=FileTickLock(default_paper_tick_lock_path()),
             dry_run=True,
             paper_logger=paper_logger,
