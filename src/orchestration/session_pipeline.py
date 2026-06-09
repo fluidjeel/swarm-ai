@@ -39,7 +39,9 @@ from src.risk.gatekeeper import GatekeeperVerdict, evaluate_from_context
 from src.features.feature_engine import (
     FeatureEngineError,
     FeatureEngineErrorCode,
+    SharedMarketSnapshot,
     compute_feature_payload,
+    compute_index_feature_payload,
 )
 from src.orchestration.broker_recovery import (
     BootLogger,
@@ -248,6 +250,7 @@ class SessionPipeline:
         credit_spread_position: CreditSpreadPosition | None = None,
         nifty_bars: Sequence[OhlcvBar] | None = None,
         session_open_vix: float | None = None,
+        shared_market: SharedMarketSnapshot | None = None,
     ) -> SessionTickResult:
         """
         Execute one deterministic pipeline tick.
@@ -276,7 +279,7 @@ class SessionPipeline:
         tick_timestamp = datetime.now(IST).isoformat()
         try:
             ctx = sync_circuit_breaker(ctx)
-            ctx = await self._refresh_features(ctx)
+            ctx = await self._refresh_features(ctx, shared_market=shared_market)
             if self._broker_sync:
                 prior_symbol = ctx.open_position.symbol if ctx.open_position else None
                 ctx = await sync_position_from_broker(self._provider, ctx)
@@ -581,33 +584,48 @@ class SessionPipeline:
             }
         )
 
-    async def _refresh_features(self, ctx: AgentContext) -> AgentContext:
+    async def _refresh_features(
+        self,
+        ctx: AgentContext,
+        *,
+        shared_market: SharedMarketSnapshot | None = None,
+    ) -> AgentContext:
         try:
-            payload = await compute_feature_payload(
-                self._provider,
-                option_symbol=self._index_symbol,
-                nifty_symbol=self._index_symbol,
-                request_timeout_sec=self._request_timeout_sec,
-                pcr_history_path=self._pcr_history_path,
-            )
+            if shared_market is not None:
+                payload, index_bars = await compute_index_feature_payload(
+                    self._provider,
+                    option_symbol=self._index_symbol,
+                    index_symbol=self._index_symbol,
+                    shared=shared_market,
+                    request_timeout_sec=self._request_timeout_sec,
+                    pcr_history_path=self._pcr_history_path,
+                )
+            else:
+                payload = await compute_feature_payload(
+                    self._provider,
+                    option_symbol=self._index_symbol,
+                    nifty_symbol=self._index_symbol,
+                    request_timeout_sec=self._request_timeout_sec,
+                    pcr_history_path=self._pcr_history_path,
+                )
+                index_bars = await self._provider.get_index_ohlcv(
+                    self._index_symbol,
+                    resolution="5",
+                    lookback_bars=2,
+                )
         except FeatureEngineError as exc:
             raise SessionPipelineError(
                 str(exc),
                 code=exc.code,
             ) from exc
 
-        bars = await self._provider.get_index_ohlcv(
-            self._index_symbol,
-            resolution="5",
-            lookback_bars=2,
-        )
-        if not bars:
+        if not index_bars:
             raise SessionPipelineError(
-                "Cannot capture feature_snapshot_price: no NIFTY OHLCV bars.",
+                "Cannot capture feature_snapshot_price: no index OHLCV bars.",
                 code="MARKET_DATA",
             )
 
-        snapshot_price = float(bars[-1]["close"])
+        snapshot_price = float(index_bars[-1]["close"])
         captured_at = datetime.now(timezone.utc).isoformat()
 
         if not ctx.baseline_initialized:

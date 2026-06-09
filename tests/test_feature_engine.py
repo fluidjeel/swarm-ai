@@ -13,6 +13,8 @@ from src.features.feature_engine import (
     FeatureEngineError,
     FeatureEngineErrorCode,
     compute_feature_payload,
+    compute_index_feature_payload,
+    fetch_shared_market_features,
     to_opening_regime,
 )
 
@@ -74,6 +76,38 @@ class _FailingVixProvider(_FakeProvider):
         raise MarketDataError("simulated provider failure")
 
 
+class _CountingProvider(_FakeProvider):
+    def __init__(self) -> None:
+        self.vix_calls = 0
+        self.breadth_calls = 0
+        self.vix_history_calls = 0
+        self.pcr_calls = 0
+        self.index_ohlcv_calls = 0
+
+    async def get_vix(self) -> float:
+        self.vix_calls += 1
+        return await super().get_vix()
+
+    async def get_nifty50_ad_ratio(self) -> BreadthSnapshot:
+        self.breadth_calls += 1
+        return await super().get_nifty50_ad_ratio()
+
+    async def get_index_ohlcv(self, symbol: str, *, resolution: str = "5", lookback_bars: int = 50):
+        if symbol.endswith("INDIAVIX-INDEX"):
+            self.vix_history_calls += 1
+        else:
+            self.index_ohlcv_calls += 1
+        return await super().get_index_ohlcv(
+            symbol,
+            resolution=resolution,
+            lookback_bars=lookback_bars,
+        )
+
+    async def get_option_chain_pcr(self, symbol: str = "NSE:NIFTY50-INDEX", *, strikecount: int = 50):
+        self.pcr_calls += 1
+        return await super().get_option_chain_pcr(symbol, strikecount=strikecount)
+
+
 class FeatureEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_compute_feature_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +131,37 @@ class FeatureEngineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FeatureEngineError) as ctx:
             await compute_feature_payload(_FailingVixProvider())
         self.assertEqual(ctx.exception.code, FeatureEngineErrorCode.MARKET_DATA)
+
+    async def test_fetch_shared_market_features(self) -> None:
+        provider = _CountingProvider()
+        shared = await fetch_shared_market_features(provider)
+        self.assertEqual(shared.current_vix, 14.5)
+        self.assertEqual(shared.breadth.ad_ratio, 1.2)
+        self.assertEqual(provider.vix_calls, 1)
+        self.assertEqual(provider.breadth_calls, 1)
+        self.assertEqual(provider.vix_history_calls, 1)
+        self.assertEqual(provider.pcr_calls, 0)
+
+    async def test_compute_index_feature_payload_reuses_shared_snapshot(self) -> None:
+        provider = _CountingProvider()
+        shared = await fetch_shared_market_features(provider)
+        with tempfile.TemporaryDirectory() as tmp:
+            history_path = Path(tmp) / "pcr_history.json"
+            index_payload, index_bars = await compute_index_feature_payload(
+                provider,
+                option_symbol="NSE:NIFTY50-INDEX",
+                index_symbol="NSE:NIFTY50-INDEX",
+                shared=shared,
+                pcr_history_path=history_path,
+            )
+        self.assertEqual(index_payload["vix"], 14.5)
+        self.assertEqual(index_payload["NIFTY_500_AD_Ratio"], 1.2)
+        self.assertTrue(index_bars)
+        self.assertEqual(provider.pcr_calls, 1)
+        self.assertEqual(provider.index_ohlcv_calls, 1)
+        self.assertEqual(provider.vix_calls, 1)
+        self.assertEqual(provider.breadth_calls, 1)
+        self.assertEqual(provider.vix_history_calls, 1)
 
     def test_to_opening_regime(self) -> None:
         payload = {

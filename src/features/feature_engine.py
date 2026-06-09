@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, TypedDict
+from typing import Any, Final, Sequence, TypedDict
 
 from src.core.context import OpeningRegime
-from src.data.base_provider import MarketDataError, MarketDataProvider, MarketDataTimeoutError
+from src.data.base_provider import (
+    BreadthSnapshot,
+    MarketDataError,
+    MarketDataProvider,
+    MarketDataTimeoutError,
+    OhlcvBar,
+    OptionChainPcr,
+)
 from src.features.math_utils import (
     compute_dte_from_expiry_timestamp,
     compute_expiry_weighted_pcr_momentum,
@@ -52,6 +60,15 @@ class FeatureEngineError(RuntimeError):
         self.code = code
 
 
+@dataclass(frozen=True, slots=True)
+class SharedMarketSnapshot:
+    """Index-agnostic market inputs reused across multi-index soak lanes."""
+
+    current_vix: float
+    breadth: BreadthSnapshot
+    vix_bars: tuple[OhlcvBar, ...]
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -66,61 +83,40 @@ def to_opening_regime(payload: FeaturePayload, *, captured_at_iso: str | None = 
     )
 
 
-async def compute_feature_payload(
-    provider: MarketDataProvider,
-    *,
-    option_symbol: str = DEFAULT_OPTION_SYMBOL,
-    nifty_symbol: str = DEFAULT_NIFTY_SYMBOL,
-    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
-    pcr_history_path: Path | None = None,
-) -> FeaturePayload:
-    """Build the eval-compatible feature payload and validate via sanitizer."""
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                provider.get_vix(),
-                provider.get_option_chain_pcr(option_symbol),
-                provider.get_nifty50_ad_ratio(),
-                provider.get_index_ohlcv(nifty_symbol, resolution="5", lookback_bars=20),
-                provider.get_index_ohlcv(DEFAULT_VIX_HISTORY_SYMBOL, resolution="D", lookback_bars=5),
-                return_exceptions=True,
-            ),
-            timeout=request_timeout_sec,
-        )
-    except TimeoutError as exc:
-        raise FeatureEngineError(
-            f"Feature engine timed out after {request_timeout_sec:.1f}s",
-            code=FeatureEngineErrorCode.TIMEOUT,
-        ) from exc
-
-    labels = ("vix", "pcr", "breadth", "nifty_ohlcv", "vix_history")
+def _raise_feature_gather_errors(results: Sequence[object], labels: Sequence[str]) -> None:
     errors: list[str] = []
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             errors.append(f"{label}: {result}")
 
-    if errors:
-        if any(isinstance(r, (MarketDataTimeoutError, TimeoutError)) for r in results):
-            raise FeatureEngineError(
-                "Feature engine failed due to API timeout: " + "; ".join(errors),
-                code=FeatureEngineErrorCode.TIMEOUT,
-            )
-        if any(isinstance(r, MarketDataError) for r in results):
-            raise FeatureEngineError(
-                "Feature engine failed due to market data error: " + "; ".join(errors),
-                code=FeatureEngineErrorCode.MARKET_DATA,
-            )
+    if not errors:
+        return
+
+    if any(isinstance(r, (MarketDataTimeoutError, TimeoutError)) for r in results):
         raise FeatureEngineError(
-            "Feature engine failed: " + "; ".join(errors),
-            code=FeatureEngineErrorCode.UNKNOWN,
+            "Feature engine failed due to API timeout: " + "; ".join(errors),
+            code=FeatureEngineErrorCode.TIMEOUT,
         )
+    if any(isinstance(r, MarketDataError) for r in results):
+        raise FeatureEngineError(
+            "Feature engine failed due to market data error: " + "; ".join(errors),
+            code=FeatureEngineErrorCode.MARKET_DATA,
+        )
+    raise FeatureEngineError(
+        "Feature engine failed: " + "; ".join(errors),
+        code=FeatureEngineErrorCode.UNKNOWN,
+    )
 
-    current_vix = float(results[0])  # type: ignore[arg-type]
-    pcr_snapshot = results[1]  # type: ignore[assignment]
-    breadth = results[2]  # type: ignore[assignment]
-    nifty_bars = results[3]  # type: ignore[assignment]
-    vix_bars = results[4]  # type: ignore[assignment]
 
+def _build_feature_payload(
+    *,
+    current_vix: float,
+    pcr_snapshot: OptionChainPcr,
+    breadth: BreadthSnapshot,
+    nifty_bars: Sequence[OhlcvBar],
+    vix_bars: Sequence[OhlcvBar],
+    pcr_history_path: Path | None,
+) -> FeaturePayload:
     previous_vix = float(vix_bars[-2]["close"]) if len(vix_bars) >= 2 else current_vix
     dte = compute_dte_from_expiry_timestamp(pcr_snapshot.expiry_timestamp)
 
@@ -169,6 +165,123 @@ async def compute_feature_payload(
             else None
         ),
         dte=int(sanitized["dte"]),
+    )
+
+
+async def fetch_shared_market_features(
+    provider: MarketDataProvider,
+    *,
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
+) -> SharedMarketSnapshot:
+    """Fetch VIX, Nifty50 breadth, and VIX history once per multi-index tick."""
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                provider.get_vix(),
+                provider.get_nifty50_ad_ratio(),
+                provider.get_index_ohlcv(
+                    DEFAULT_VIX_HISTORY_SYMBOL,
+                    resolution="D",
+                    lookback_bars=5,
+                ),
+                return_exceptions=True,
+            ),
+            timeout=request_timeout_sec,
+        )
+    except TimeoutError as exc:
+        raise FeatureEngineError(
+            f"Shared market features timed out after {request_timeout_sec:.1f}s",
+            code=FeatureEngineErrorCode.TIMEOUT,
+        ) from exc
+
+    labels = ("vix", "breadth", "vix_history")
+    _raise_feature_gather_errors(results, labels)
+
+    return SharedMarketSnapshot(
+        current_vix=float(results[0]),  # type: ignore[arg-type]
+        breadth=results[1],  # type: ignore[arg-type]
+        vix_bars=tuple(results[2]),  # type: ignore[arg-type]
+    )
+
+
+async def compute_index_feature_payload(
+    provider: MarketDataProvider,
+    *,
+    option_symbol: str,
+    index_symbol: str,
+    shared: SharedMarketSnapshot,
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
+    pcr_history_path: Path | None = None,
+) -> tuple[FeaturePayload, list[OhlcvBar]]:
+    """Build per-index features using a pre-fetched shared market snapshot."""
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                provider.get_option_chain_pcr(option_symbol),
+                provider.get_index_ohlcv(index_symbol, resolution="5", lookback_bars=20),
+                return_exceptions=True,
+            ),
+            timeout=request_timeout_sec,
+        )
+    except TimeoutError as exc:
+        raise FeatureEngineError(
+            f"Index feature engine timed out after {request_timeout_sec:.1f}s",
+            code=FeatureEngineErrorCode.TIMEOUT,
+        ) from exc
+
+    labels = ("pcr", "index_ohlcv")
+    _raise_feature_gather_errors(results, labels)
+
+    pcr_snapshot = results[0]  # type: ignore[assignment]
+    index_bars = list(results[1])  # type: ignore[arg-type]
+    payload = _build_feature_payload(
+        current_vix=shared.current_vix,
+        pcr_snapshot=pcr_snapshot,
+        breadth=shared.breadth,
+        nifty_bars=index_bars,
+        vix_bars=shared.vix_bars,
+        pcr_history_path=pcr_history_path,
+    )
+    return payload, index_bars
+
+
+async def compute_feature_payload(
+    provider: MarketDataProvider,
+    *,
+    option_symbol: str = DEFAULT_OPTION_SYMBOL,
+    nifty_symbol: str = DEFAULT_NIFTY_SYMBOL,
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
+    pcr_history_path: Path | None = None,
+) -> FeaturePayload:
+    """Build the eval-compatible feature payload and validate via sanitizer."""
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                provider.get_vix(),
+                provider.get_option_chain_pcr(option_symbol),
+                provider.get_nifty50_ad_ratio(),
+                provider.get_index_ohlcv(nifty_symbol, resolution="5", lookback_bars=20),
+                provider.get_index_ohlcv(DEFAULT_VIX_HISTORY_SYMBOL, resolution="D", lookback_bars=5),
+                return_exceptions=True,
+            ),
+            timeout=request_timeout_sec,
+        )
+    except TimeoutError as exc:
+        raise FeatureEngineError(
+            f"Feature engine timed out after {request_timeout_sec:.1f}s",
+            code=FeatureEngineErrorCode.TIMEOUT,
+        ) from exc
+
+    labels = ("vix", "pcr", "breadth", "nifty_ohlcv", "vix_history")
+    _raise_feature_gather_errors(results, labels)
+
+    return _build_feature_payload(
+        current_vix=float(results[0]),  # type: ignore[arg-type]
+        pcr_snapshot=results[1],  # type: ignore[arg-type]
+        breadth=results[2],  # type: ignore[arg-type]
+        nifty_bars=results[3],  # type: ignore[arg-type]
+        vix_bars=results[4],  # type: ignore[arg-type]
+        pcr_history_path=pcr_history_path,
     )
 
 

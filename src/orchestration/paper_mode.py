@@ -42,7 +42,13 @@ from src.orchestration.runtime_guards import (
     write_tick_heartbeat,
 )
 from src.orchestration.session_clock import IST, current_phase, is_trading_day
+from src.features.feature_engine import (
+    FeatureEngineError,
+    SharedMarketSnapshot,
+    fetch_shared_market_features,
+)
 from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
+from src.data.base_provider import MarketDataProvider
 from src.orchestration.tick_lock import FileTickLock
 from src.risk.exit_engine import ExitAction
 from src.risk.gatekeeper import GatekeeperVerdict
@@ -51,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG_DIR = ROOT / "logs" / "paper_soak"
 DEFAULT_TICK_SECONDS = 300
 DEFAULT_SOAK_HOURS = 4.0
+DEFAULT_LANE_STAGGER_SECONDS = 3.0
 
 
 class PaperEventLogger(Protocol):
@@ -550,26 +557,32 @@ class PaperSoakRunner:
 
 
 class MultiIndexPaperSoakRunner:
-    """Run one soak session across NIFTY, BANKNIFTY, and SENSEX in parallel."""
+    """Run one soak session across NIFTY, BANKNIFTY, and SENSEX with shared market features."""
 
     def __init__(
         self,
         *,
         lanes: list[IndexSoakLane],
+        provider: MarketDataProvider,
         session_id: str,
         summary_logger: JsonlPaperLogger,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
         duration_hours: float = DEFAULT_SOAK_HOURS,
+        lane_stagger_seconds: float = DEFAULT_LANE_STAGGER_SECONDS,
+        request_timeout_sec: float = 60.0,
         sleep_fn: Callable[[float], Any] | None = None,
         now_fn: Callable[[], datetime] | None = None,
         wall_now_fn: Callable[[], datetime] | None = None,
         memory_guard_enabled: bool = True,
     ) -> None:
         self._lanes = lanes
+        self._provider = provider
         self._session_id = session_id
         self._summary_logger = summary_logger
         self._tick_seconds = tick_seconds
         self._duration = timedelta(hours=duration_hours)
+        self._lane_stagger_seconds = lane_stagger_seconds
+        self._request_timeout_sec = request_timeout_sec
         self._sleep = sleep_fn or asyncio.sleep
         self._now = now_fn or (lambda: datetime.now(IST))
         self._wall_now = wall_now_fn or (lambda: datetime.now(IST))
@@ -643,11 +656,47 @@ class MultiIndexPaperSoakRunner:
                         self.request_stop()
                         break
 
-                # Sequential lane ticks to avoid Fyers 429 bursts (shared VIX/breadth fetches).
-                for lane in self._lanes:
+                try:
+                    shared_market = await fetch_shared_market_features(
+                        self._provider,
+                        request_timeout_sec=self._request_timeout_sec,
+                    )
+                except FeatureEngineError as exc:
+                    for lane in self._lanes:
+                        lane.stats.broker_errors += 1
+                        lane.logger.log_paper_row(
+                            {
+                                "event": "paper_tick_error",
+                                "session_id": lane.ctx.session_id,
+                                "index_key": lane.contract.key,
+                                "timestamp": now.isoformat(),
+                                "detail": str(exc),
+                                "code": exc.code,
+                            }
+                        )
+                    self._summary_logger.log_paper_row(
+                        {
+                            "event": "paper_shared_features_error",
+                            "session_id": self._session_id,
+                            "timestamp": now.isoformat(),
+                            "detail": str(exc),
+                            "code": exc.code,
+                        }
+                    )
+                    await self._sleep(self._tick_seconds)
+                    continue
+
+                for lane_index, lane in enumerate(self._lanes):
                     if self._stop:
                         break
-                    await self._run_lane_tick(lane, now=now, memory_pct=memory_pct)
+                    if lane_index > 0 and self._lane_stagger_seconds > 0:
+                        await self._sleep(self._lane_stagger_seconds)
+                    await self._run_lane_tick(
+                        lane,
+                        now=now,
+                        memory_pct=memory_pct,
+                        shared_market=shared_market,
+                    )
                 await self._sleep(self._tick_seconds)
         finally:
             for lane in self._lanes:
@@ -676,12 +725,16 @@ class MultiIndexPaperSoakRunner:
         *,
         now: datetime,
         memory_pct: float,
+        shared_market: SharedMarketSnapshot | None = None,
     ) -> None:
         tick_start = time.perf_counter()
         exit_action: str | None = None
         live_ltp: float | None = None
         try:
-            result = await lane.pipeline.run_tick(lane.ctx)
+            result = await lane.pipeline.run_tick(
+                lane.ctx,
+                shared_market=shared_market,
+            )
             lane.ctx = result.ctx
             live_ltp = result.live_underlying_ltp
             if result.exit_decision is not None:
@@ -857,12 +910,18 @@ def build_soak_runner(
         )
 
     summary_logger = logger or JsonlPaperLogger(resolved_log_dir / f"{base_session_id}.jsonl")
+    lane_stagger_seconds = float(
+        os.getenv("PAPER_LANE_STAGGER_SECONDS", str(DEFAULT_LANE_STAGGER_SECONDS))
+    )
     runner = MultiIndexPaperSoakRunner(
         lanes=lanes,
+        provider=provider,
         session_id=base_session_id,
         summary_logger=summary_logger,
         tick_seconds=resolved_tick_seconds,
         duration_hours=resolved_duration_hours,
+        lane_stagger_seconds=lane_stagger_seconds,
+        request_timeout_sec=60.0,
     )
     runner.configure_observability(
         heartbeat=JsonlHeartbeatWriter(default_heartbeat_path()),
