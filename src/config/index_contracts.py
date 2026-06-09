@@ -69,8 +69,34 @@ _SYMBOL_LOOKUP: dict[str, IndexContract] = {
 }
 
 
+SOAK_INDEX_KEYS: tuple[str, ...] = ("nifty", "banknifty", "sensex")
+
+
 def list_index_keys() -> tuple[str, ...]:
     return tuple(_INDEX_REGISTRY.keys())
+
+
+def resolve_soak_index_keys(name_or_symbol: str) -> tuple[str, ...]:
+    """Resolve soak target(s): single key, comma-separated list, or ``all``."""
+    normalized = name_or_symbol.strip().lower()
+    if not normalized:
+        raise ValueError("Soak index selection is required.")
+
+    if normalized in {"all", "*", "triple", "multi"}:
+        return SOAK_INDEX_KEYS
+
+    if "," in normalized:
+        keys: list[str] = []
+        for part in normalized.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            keys.append(resolve_index_contract(part).key)
+        if not keys:
+            raise ValueError("Soak index list is empty.")
+        return tuple(keys)
+
+    return (resolve_index_contract(normalized).key,)
 
 
 def resolve_index_contract(name_or_symbol: str) -> IndexContract:

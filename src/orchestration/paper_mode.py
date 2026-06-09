@@ -12,11 +12,17 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Protocol
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from src.config.index_contracts import IndexContract, resolve_index_contract, risk_config_for_contract
+from src.config.index_contracts import (
+    IndexContract,
+    resolve_index_contract,
+    resolve_soak_index_keys,
+    risk_config_for_contract,
+)
 from src.config.risk_config import load_risk_config
 from src.config.secrets import get_fyers_credentials, load_project_env
 from src.core.context import AgentContext, CriticStatus
@@ -85,13 +91,22 @@ class PaperSoakStats:
         self.gatekeeper_rejects[key] = self.gatekeeper_rejects.get(key, 0) + 1
 
 
-def default_paper_tick_lock_path() -> Path:
+def paper_tick_lock_path_for(index_key: str | None = None) -> Path:
     custom = os.getenv("PAPER_TICK_LOCK_PATH")
-    if custom:
+    if custom and index_key is None:
         return Path(custom)
     if sys.platform == "win32":
-        return Path(tempfile.gettempdir()) / "a2a-paper-tick.lock"
-    return Path("/var/lock/a2a-paper-tick.lock")
+        base = Path(tempfile.gettempdir())
+        if index_key is None:
+            return base / "a2a-paper-tick.lock"
+        return base / f"a2a-paper-tick-{index_key}.lock"
+    if index_key is None:
+        return Path("/var/lock/a2a-paper-tick.lock")
+    return Path(f"/var/lock/a2a-paper-tick-{index_key}.lock")
+
+
+def default_paper_tick_lock_path() -> Path:
+    return paper_tick_lock_path_for(None)
 
 
 def _serialize_critic(ctx: AgentContext) -> dict[str, Any] | None:
@@ -267,15 +282,56 @@ def build_paper_soak_summary(stats: PaperSoakStats, *, session_id: str) -> dict[
 def print_paper_soak_summary(summary: dict[str, Any]) -> None:
     print("\n=== Paper Soak Summary ===")
     print(f"Session: {summary['session_id']}")
+    if summary.get("event") == "paper_soak_complete_multi":
+        for index_key, lane_summary in summary.get("indices", {}).items():
+            print(f"\n--- {index_key.upper()} ---")
+            _print_lane_summary(lane_summary)
+        return
+    _print_lane_summary(summary)
+
+
+def _print_lane_summary(summary: dict[str, Any]) -> None:
     print(f"Total ticks: {summary['total_ticks']}")
     print(f"Paper approves (would-have-traded): {summary['paper_approves']}")
     print(f"Paper exits: {summary['paper_exits']}")
     print(f"Broker errors: {summary['broker_errors']}")
     print(f"Max stale quote distance: {summary['max_stale_quote_distance']}")
-    if summary["critic_rejects"]:
+    if summary.get("critic_rejects"):
         print(f"Critic rejects: {summary['critic_rejects']}")
-    if summary["gatekeeper_rejects"]:
+    if summary.get("gatekeeper_rejects"):
         print(f"Gatekeeper rejects: {summary['gatekeeper_rejects']}")
+
+
+def build_multi_paper_soak_summary(
+    lane_summaries: dict[str, dict[str, Any]],
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    return {
+        "event": "paper_soak_complete_multi",
+        "session_id": session_id,
+        "timestamp": datetime.now(IST).isoformat(),
+        "indices": lane_summaries,
+    }
+
+
+class PaperSoakRunnerProtocol(Protocol):
+    _duration: timedelta
+    _tick_seconds: float
+
+    def request_stop(self) -> None: ...
+
+    async def run(self, ctx: AgentContext | None = None) -> dict[str, Any]: ...
+
+
+@dataclass
+class IndexSoakLane:
+    contract: IndexContract
+    pipeline: SessionPipeline
+    logger: JsonlPaperLogger
+    ctx: AgentContext
+    stats: PaperSoakStats = field(default_factory=PaperSoakStats)
+    tick_number: int = 0
 
 
 class PaperSoakRunner:
@@ -486,27 +542,269 @@ class PaperSoakRunner:
         exercise_broker: bool = False,
         index_symbol: str | None = None,
     ) -> PaperSoakRunner:
-        load_project_env()
-        app_id, access_token = get_fyers_credentials()
-        provider = FyersMarketDataProvider(
-            app_id=app_id,
-            access_token=access_token,
-            request_timeout_sec=60.0,
-        )
-        session_id = os.getenv("PAPER_SESSION_ID", f"paper-{uuid.uuid4().hex[:12]}")
-        tick_seconds = float(os.getenv("PAPER_TICK_SECONDS", str(DEFAULT_TICK_SECONDS)))
-        duration_hours = float(os.getenv("PAPER_SOAK_HOURS", str(DEFAULT_SOAK_HOURS)))
-        log_dir = Path(os.getenv("PAPER_LOG_DIR", str(DEFAULT_LOG_DIR)))
-        log_path = log_dir / f"{session_id}.jsonl"
-        paper_logger = logger or JsonlPaperLogger(log_path)
+        return build_soak_runner(
+            logger=logger,
+            exercise_broker=exercise_broker,
+            index_symbol=index_symbol,
+        )  # type: ignore[return-value]
 
-        execution_port = (
-            FyersExecutionPort(app_id=app_id, access_token=access_token)
-            if exercise_broker
-            else NoOpExecutionPort()
+
+class MultiIndexPaperSoakRunner:
+    """Run one soak session across NIFTY, BANKNIFTY, and SENSEX in parallel."""
+
+    def __init__(
+        self,
+        *,
+        lanes: list[IndexSoakLane],
+        session_id: str,
+        summary_logger: JsonlPaperLogger,
+        tick_seconds: float = DEFAULT_TICK_SECONDS,
+        duration_hours: float = DEFAULT_SOAK_HOURS,
+        sleep_fn: Callable[[float], Any] | None = None,
+        now_fn: Callable[[], datetime] | None = None,
+        wall_now_fn: Callable[[], datetime] | None = None,
+        memory_guard_enabled: bool = True,
+    ) -> None:
+        self._lanes = lanes
+        self._session_id = session_id
+        self._summary_logger = summary_logger
+        self._tick_seconds = tick_seconds
+        self._duration = timedelta(hours=duration_hours)
+        self._sleep = sleep_fn or asyncio.sleep
+        self._now = now_fn or (lambda: datetime.now(IST))
+        self._wall_now = wall_now_fn or (lambda: datetime.now(IST))
+        self._stop = False
+        self._started_at_wall: datetime | None = None
+        self._heartbeat: JsonlHeartbeatWriter | None = None
+        self._memory_guard_enabled = memory_guard_enabled
+
+    def configure_observability(
+        self,
+        *,
+        heartbeat: JsonlHeartbeatWriter | None = None,
+        tick_trace: JsonlTickTraceWriter | None = None,
+    ) -> None:
+        self._heartbeat = heartbeat
+        _ = tick_trace
+
+    def request_stop(self) -> None:
+        self._stop = True
+
+    async def run(self, ctx: AgentContext | None = None) -> dict[str, Any]:
+        _ = ctx
+        started_at = self._now()
+        self._started_at_wall = self._wall_now()
+
+        try:
+            if is_trading_day(started_at):
+                for lane in self._lanes:
+                    try:
+                        lane.ctx = await lane.pipeline.bootstrap_session(
+                            lane.ctx,
+                            now_ist=started_at,
+                        )
+                    except SessionPipelineError as exc:
+                        lane.logger.log_paper_row(
+                            {
+                                "event": "paper_bootstrap_failed",
+                                "session_id": lane.ctx.session_id,
+                                "index_key": lane.contract.key,
+                                "timestamp": self._now().isoformat(),
+                                "detail": str(exc),
+                                "code": exc.code,
+                            }
+                        )
+            else:
+                for lane in self._lanes:
+                    lane.stats.skipped_non_trading_days += 1
+
+            while not self._stop and self._within_duration():
+                now = self._now()
+                if not is_trading_day(now):
+                    for lane in self._lanes:
+                        lane.stats.skipped_non_trading_days += 1
+                    await self._sleep(self._tick_seconds)
+                    continue
+
+                memory_pct = 0.0
+                if self._memory_guard_enabled:
+                    try:
+                        memory_pct = check_memory_usage().percent_used
+                    except MemoryGuardError as exc:
+                        self._summary_logger.log_paper_row(
+                            {
+                                "event": "paper_tick_error",
+                                "session_id": self._session_id,
+                                "timestamp": now.isoformat(),
+                                "detail": str(exc),
+                                "code": "MEMORY_GUARD",
+                            }
+                        )
+                        self.request_stop()
+                        break
+
+                await asyncio.gather(
+                    *[
+                        self._run_lane_tick(lane, now=now, memory_pct=memory_pct)
+                        for lane in self._lanes
+                    ]
+                )
+                await self._sleep(self._tick_seconds)
+        finally:
+            for lane in self._lanes:
+                lane.pipeline.release_tick_lock()
+
+        lane_summaries = {
+            lane.contract.key: build_paper_soak_summary(
+                lane.stats,
+                session_id=lane.ctx.session_id,
+            )
+            for lane in self._lanes
+        }
+        summary = build_multi_paper_soak_summary(
+            lane_summaries,
+            session_id=self._session_id,
         )
-        index_key = (index_symbol or os.getenv("PAPER_INDEX", "nifty")).strip()
-        index_contract = resolve_index_contract(index_key)
+        self._summary_logger.log_paper_row(summary)
+        for lane in self._lanes:
+            lane.logger.log_paper_row(lane_summaries[lane.contract.key])
+        print_paper_soak_summary(summary)
+        return summary
+
+    async def _run_lane_tick(
+        self,
+        lane: IndexSoakLane,
+        *,
+        now: datetime,
+        memory_pct: float,
+    ) -> None:
+        tick_start = time.perf_counter()
+        exit_action: str | None = None
+        live_ltp: float | None = None
+        try:
+            result = await lane.pipeline.run_tick(lane.ctx)
+            lane.ctx = result.ctx
+            live_ltp = result.live_underlying_ltp
+            if result.exit_decision is not None:
+                exit_action = result.exit_decision.action.value
+                if result.exit_decision.action == ExitAction.EXIT_MARKET:
+                    lane.stats.paper_exits += 1
+            elapsed_ms = result.elapsed_ms or (time.perf_counter() - tick_start) * 1000
+            _record_lane_tick_stats(lane, elapsed_ms, live_ltp)
+            lane.tick_number += 1
+            lane.stats.total_ticks += 1
+            lane.logger.log_paper_row(
+                build_paper_tick_row(
+                    session_id=lane.ctx.session_id,
+                    tick_number=lane.tick_number,
+                    ctx=lane.ctx,
+                    elapsed_ms=elapsed_ms,
+                    live_underlying_ltp=live_ltp,
+                    exit_action=exit_action,
+                    index_contract=lane.contract,
+                )
+            )
+            if self._heartbeat is not None:
+                write_tick_heartbeat(
+                    self._heartbeat,
+                    session_id=f"{self._session_id}:{lane.contract.key}",
+                    tick_number=lane.tick_number,
+                    memory_pct=memory_pct,
+                    elapsed_ms=elapsed_ms,
+                )
+        except SessionPipelineError as exc:
+            lane.stats.broker_errors += 1
+            lane.logger.log_paper_row(
+                {
+                    "event": "paper_tick_error",
+                    "session_id": lane.ctx.session_id,
+                    "index_key": lane.contract.key,
+                    "timestamp": now.isoformat(),
+                    "detail": str(exc),
+                    "code": exc.code,
+                }
+            )
+
+    def _within_duration(self) -> bool:
+        if self._started_at_wall is None:
+            return True
+        return self._wall_now() - self._started_at_wall < self._duration
+
+
+def _record_lane_tick_stats(
+    lane: IndexSoakLane,
+    elapsed_ms: float,
+    live_ltp: float | None,
+) -> None:
+    lane.stats.total_elapsed_ms += elapsed_ms
+    if live_ltp is not None and lane.ctx.feature_snapshot_price is not None:
+        distance = abs(live_ltp - lane.ctx.feature_snapshot_price)
+        lane.stats.max_stale_quote_distance = max(
+            lane.stats.max_stale_quote_distance,
+            distance,
+        )
+    if lane.ctx.critic_decision and lane.ctx.critic_decision.status == CriticStatus.REJECT:
+        lane.stats.record_critic(lane.ctx.critic_decision.reason)
+    gatekeeper = lane.ctx.gatekeeper_decision
+    if gatekeeper is not None:
+        if gatekeeper.verdict == GatekeeperVerdict.APPROVE:
+            lane.stats.paper_approves += 1
+        elif gatekeeper.verdict == GatekeeperVerdict.REJECT:
+            rule_id = getattr(gatekeeper, "rule_id", None)
+            lane.stats.record_gatekeeper(
+                rule_id.value if rule_id is not None else None,
+                getattr(gatekeeper, "reason", None),
+            )
+
+
+def build_soak_runner(
+    *,
+    provider: FyersMarketDataProvider | None = None,
+    logger: PaperEventLogger | None = None,
+    exercise_broker: bool = False,
+    index_symbol: str | None = None,
+    session_id: str | None = None,
+    tick_seconds: float | None = None,
+    duration_hours: float | None = None,
+    log_dir: Path | None = None,
+) -> PaperSoakRunnerProtocol:
+    load_project_env()
+    app_id, access_token = get_fyers_credentials()
+    provider = provider or FyersMarketDataProvider(
+        app_id=app_id,
+        access_token=access_token,
+        request_timeout_sec=60.0,
+    )
+    base_session_id = session_id or os.getenv(
+        "PAPER_SESSION_ID",
+        f"paper-{uuid.uuid4().hex[:12]}",
+    )
+    resolved_tick_seconds = float(
+        tick_seconds if tick_seconds is not None else os.getenv(
+            "PAPER_TICK_SECONDS",
+            str(DEFAULT_TICK_SECONDS),
+        )
+    )
+    resolved_duration_hours = float(
+        duration_hours if duration_hours is not None else os.getenv(
+            "PAPER_SOAK_HOURS",
+            str(DEFAULT_SOAK_HOURS),
+        )
+    )
+    resolved_log_dir = log_dir or Path(os.getenv("PAPER_LOG_DIR", str(DEFAULT_LOG_DIR)))
+    index_selection = (index_symbol or os.getenv("PAPER_INDEX", "nifty")).strip()
+    index_keys = resolve_soak_index_keys(index_selection)
+
+    execution_port = (
+        FyersExecutionPort(app_id=app_id, access_token=access_token)
+        if exercise_broker
+        else NoOpExecutionPort()
+    )
+
+    if len(index_keys) == 1:
+        index_contract = resolve_index_contract(index_keys[0])
+        log_path = resolved_log_dir / f"{base_session_id}.jsonl"
+        paper_logger = logger or JsonlPaperLogger(log_path)
         risk_config = risk_config_for_contract(index_contract, load_risk_config())
         pipeline = SessionPipeline(
             provider,
@@ -519,19 +817,58 @@ class PaperSoakRunner:
             broker_sync=exercise_broker,
             memory_guard_enabled=True,
         )
-        runner = cls(
+        runner = PaperSoakRunner(
             pipeline,
-            session_id=session_id,
+            session_id=base_session_id,
             logger=paper_logger,
-            tick_seconds=tick_seconds,
-            duration_hours=duration_hours,
+            tick_seconds=resolved_tick_seconds,
+            duration_hours=resolved_duration_hours,
             index_contract=index_contract,
         )
         runner.configure_observability(
             heartbeat=JsonlHeartbeatWriter(default_heartbeat_path()),
-            tick_trace=JsonlTickTraceWriter(default_tick_trace_path(session_id)),
+            tick_trace=JsonlTickTraceWriter(default_tick_trace_path(base_session_id)),
         )
         return runner
+
+    lanes: list[IndexSoakLane] = []
+    for index_key in index_keys:
+        contract = resolve_index_contract(index_key)
+        lane_session_id = f"{base_session_id}-{index_key}"
+        lane_logger = JsonlPaperLogger(resolved_log_dir / f"{lane_session_id}.jsonl")
+        risk_config = risk_config_for_contract(contract, load_risk_config())
+        pipeline = SessionPipeline(
+            provider,
+            index_symbol=contract.symbol,
+            risk_config=risk_config,
+            tick_lock=FileTickLock(paper_tick_lock_path_for(index_key)),
+            dry_run=True,
+            paper_logger=lane_logger,
+            execution_port=execution_port,
+            broker_sync=exercise_broker,
+            memory_guard_enabled=True,
+        )
+        lanes.append(
+            IndexSoakLane(
+                contract=contract,
+                pipeline=pipeline,
+                logger=lane_logger,
+                ctx=AgentContext(session_id=lane_session_id),
+            )
+        )
+
+    summary_logger = logger or JsonlPaperLogger(resolved_log_dir / f"{base_session_id}.jsonl")
+    runner = MultiIndexPaperSoakRunner(
+        lanes=lanes,
+        session_id=base_session_id,
+        summary_logger=summary_logger,
+        tick_seconds=resolved_tick_seconds,
+        duration_hours=resolved_duration_hours,
+    )
+    runner.configure_observability(
+        heartbeat=JsonlHeartbeatWriter(default_heartbeat_path()),
+    )
+    return runner
 
 
 async def _async_main(argv: list[str] | None = None) -> int:
@@ -566,8 +903,8 @@ async def _async_main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="KEY",
         help=(
-            "Index contract for quotes/strikes: nifty (default), sensex, banknifty, "
-            "or a full Fyers symbol. Env: PAPER_INDEX."
+            "Index contract: nifty (default), sensex, banknifty, all (all three), "
+            "comma-separated list, or full Fyers symbol. Env: PAPER_INDEX."
         ),
     )
     args = parser.parse_args(argv)
@@ -577,7 +914,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
         runner = build_mock_runner(exercise_broker=args.broker, index_symbol=args.index)
     else:
-        runner = PaperSoakRunner.from_env(
+        runner = build_soak_runner(
             exercise_broker=args.broker,
             index_symbol=args.index,
         )

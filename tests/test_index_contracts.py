@@ -6,12 +6,26 @@ import unittest
 
 from datetime import datetime
 
-from src.config.index_contracts import resolve_index_contract, risk_config_for_contract
+from src.config.index_contracts import (
+    SOAK_INDEX_KEYS,
+    resolve_index_contract,
+    resolve_soak_index_keys,
+    risk_config_for_contract,
+)
 from src.config.risk_config import RiskConfig
 from src.orchestration.session_clock import IST
 
 
 class IndexContractTests(unittest.TestCase):
+    def test_resolve_soak_all_returns_three_indices(self) -> None:
+        self.assertEqual(resolve_soak_index_keys("all"), SOAK_INDEX_KEYS)
+
+    def test_resolve_soak_comma_list(self) -> None:
+        self.assertEqual(
+            resolve_soak_index_keys("nifty,sensex"),
+            ("nifty", "sensex"),
+        )
+
     def test_resolve_shorthand_keys(self) -> None:
         nifty = resolve_index_contract("nifty")
         sensex = resolve_index_contract("sensex")

@@ -15,10 +15,13 @@ from src.core.context import AgentContext, CriticDecision, CriticStatus, RegimeL
 from src.data.base_provider import BreadthSnapshot, OptionChainPcr, OptionGreeks, Quote
 from src.orchestration.paper_mode import (
     JsonlPaperLogger,
+    MultiIndexPaperSoakRunner,
     PaperSoakRunner,
     build_paper_soak_summary,
     build_paper_tick_row,
+    build_soak_runner,
     default_paper_tick_lock_path,
+    paper_tick_lock_path_for,
 )
 from src.orchestration.session_clock import IST, NSE_HOLIDAYS
 from src.orchestration.session_pipeline import SessionPipeline
@@ -339,6 +342,27 @@ class PaperModeHelperTests(unittest.TestCase):
     def test_default_paper_tick_lock_path_windows_safe(self) -> None:
         path = default_paper_tick_lock_path()
         self.assertTrue(str(path).endswith("a2a-paper-tick.lock"))
+
+    def test_paper_tick_lock_path_per_index(self) -> None:
+        path = paper_tick_lock_path_for("sensex")
+        self.assertIn("sensex", str(path))
+
+    @patch("src.orchestration.paper_mode.get_fyers_credentials", return_value=("app", "token"))
+    @patch("src.orchestration.paper_mode.FyersMarketDataProvider")
+    def test_build_soak_runner_all_creates_multi_runner(
+        self,
+        _provider_cls: Any,
+        _creds: Any,
+    ) -> None:
+        runner = build_soak_runner(
+            index_symbol="all",
+            session_id="paper-multi-test01",
+            log_dir=Path(tempfile.gettempdir()),
+        )
+        self.assertIsInstance(runner, MultiIndexPaperSoakRunner)
+        self.assertEqual(len(runner._lanes), 3)
+        keys = {lane.contract.key for lane in runner._lanes}
+        self.assertEqual(keys, {"nifty", "banknifty", "sensex"})
 
 
 if __name__ == "__main__":
