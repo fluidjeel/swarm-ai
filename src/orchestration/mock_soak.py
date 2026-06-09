@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.config.index_contracts import resolve_index_contract
 from src.config.risk_config import RiskConfig
 from src.core.context import AgentContext, OpenPosition
 from src.data.base_provider import BreadthSnapshot, MarketDataProvider, OptionChainPcr, OptionGreeks, Quote
@@ -117,15 +118,21 @@ class MockMarketDataProvider:
         return Quote(symbol=symbol, bid=100.0, ask=101.0, ltp=100.5, spread_pct=0.01)
 
 
-def build_mock_runner(*, exercise_broker: bool = False) -> PaperSoakRunner:
+def build_mock_runner(
+    *,
+    exercise_broker: bool = False,
+    index_symbol: str | None = None,
+) -> PaperSoakRunner:
     session_id = f"mock-{uuid.uuid4().hex[:12]}"
     log_dir = Path("logs") / "paper_soak"
     log_path = log_dir / f"{session_id}.jsonl"
     paper_logger = JsonlPaperLogger(log_path)
     provider: MarketDataProvider = MockMarketDataProvider()  # type: ignore[assignment]
     execution_port = MockExecutionPort() if exercise_broker else NoOpExecutionPort()
+    index_contract = resolve_index_contract(index_symbol or "nifty")
     pipeline = SessionPipeline(
         provider,
+        index_symbol=index_contract.symbol,
         tick_lock=NullTickLock(),
         dry_run=True,
         paper_logger=paper_logger,
@@ -142,4 +149,5 @@ def build_mock_runner(*, exercise_broker: bool = False) -> PaperSoakRunner:
         duration_hours=0.0002,
         now_fn=lambda: MOCK_SOAK_NOW,
         memory_guard_enabled=False,
+        index_contract=index_contract,
     )

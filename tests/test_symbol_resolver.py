@@ -67,9 +67,18 @@ class WeeklyExpiryTests(unittest.TestCase):
         from src.agents.symbol_resolver import _weekly_expiry_timestamps
 
         monday_ist = datetime(2025, 6, 2, 10, 0, tzinfo=IST)
-        expiries = _weekly_expiry_timestamps(now=monday_ist, count=2)
+        expiries = _weekly_expiry_timestamps(weekday=3, now=monday_ist, count=2)
         self.assertEqual(len(expiries), 2)
         self.assertLess(expiries[0], expiries[1])
+
+    def test_nifty_tuesday_weekly_after_sep_2025(self) -> None:
+        from src.agents.symbol_resolver import select_expiry
+
+        tuesday_expiry_day = datetime(2026, 6, 9, 10, 27, tzinfo=IST)
+        ctx = AgentContext(session_id="symbol-resolver-exp-00", dte=0)
+        expiry_ts = select_expiry(ctx, RiskConfig(), now=tuesday_expiry_day)
+        expiry_date = datetime.fromtimestamp(expiry_ts, tz=IST).date()
+        self.assertEqual(expiry_date, date(2026, 6, 16))
 
     def test_is_valid_expiry_date_rejects_holiday_and_weekend(self) -> None:
         from src.agents.symbol_resolver import _is_valid_expiry_date
@@ -83,7 +92,7 @@ class WeeklyExpiryTests(unittest.TestCase):
 
         # 2026-03-26 (Good Friday) is a Thursday NSE holiday.
         wednesday_before = datetime(2026, 3, 25, 10, 0, tzinfo=IST)
-        expiries = _weekly_expiry_timestamps(now=wednesday_before, count=1)
+        expiries = _weekly_expiry_timestamps(weekday=3, now=wednesday_before, count=1)
         self.assertEqual(len(expiries), 1)
         expiry_date = datetime.fromtimestamp(expiries[0], tz=IST).date()
         self.assertNotEqual(expiry_date, date(2026, 3, 26))
@@ -100,18 +109,26 @@ class SelectExpiryTests(unittest.TestCase):
         expiry_ts = select_expiry(ctx, self.config, now=self.monday_ist)
         self.assertGreater(expiry_ts, int(self.monday_ist.timestamp()))
 
-    def test_select_expiry_raises_when_dte_below_min(self) -> None:
+    def test_select_expiry_rolls_forward_when_pcr_dte_is_zero(self) -> None:
         ctx = AgentContext(session_id="symbol-resolver-exp-02", dte=0)
-        with self.assertRaises(ExpirySelectionError):
-            select_expiry(ctx, self.config, now=self.monday_ist)
+        expiry_ts = select_expiry(ctx, self.config, now=self.monday_ist)
+        self.assertGreater(expiry_ts, int(self.monday_ist.timestamp()))
 
-    def test_select_expiry_raises_when_dte_above_max(self) -> None:
-        ctx = AgentContext(session_id="symbol-resolver-exp-03", dte=10)
-        with self.assertRaises(ExpirySelectionError):
-            select_expiry(ctx, self.config, now=self.monday_ist)
+    def test_select_expiry_sensex_uses_thursday_weekly(self) -> None:
+        nifty_expiry_tuesday = datetime(2026, 6, 9, 10, 0, tzinfo=IST)
+        ctx = AgentContext(session_id="symbol-resolver-exp-03", dte=0)
+        expiry_ts = select_expiry(
+            ctx,
+            self.config,
+            index_symbol="BSE:SENSEX-INDEX",
+            now=nifty_expiry_tuesday,
+        )
+        expiry_date = datetime.fromtimestamp(expiry_ts, tz=IST).date()
+        self.assertEqual(expiry_date.weekday(), 3)
+        self.assertEqual(expiry_date, date(2026, 6, 11))
 
     def test_select_expiry_rejects_when_no_weekly_in_band(self) -> None:
-        config = RiskConfig(min_dte_for_entry=20, max_dte_for_entry=30)
+        config = RiskConfig(min_dte_for_entry=25, max_dte_for_entry=30)
         ctx = AgentContext(session_id="symbol-resolver-exp-04", dte=25)
         with self.assertRaises(ExpirySelectionError):
             select_expiry(ctx, config, now=self.monday_ist)

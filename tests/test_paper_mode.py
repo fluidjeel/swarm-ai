@@ -317,6 +317,9 @@ class PaperModeHelperTests(unittest.TestCase):
         )
         self.assertEqual(row["event"], "paper_tick")
         self.assertAlmostEqual(row["stale_quote_distance"], 1.2)
+        self.assertEqual(row["final_outcome"], "WOULD_TRADE")
+        self.assertIn("WOULD_TRADE", row["decision_summary"])
+        self.assertIn("iron_condor", row["decision_summary"])
 
     def test_jsonl_logger_writes_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

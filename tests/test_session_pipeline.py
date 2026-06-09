@@ -620,14 +620,18 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("selection_error:StrikeSelectionError", result.ctx.critic_decision.reason)
 
     async def test_run_tick_expiry_selection_error_becomes_critic_reject(self) -> None:
-        tight_dte_config = RiskConfig(min_dte_for_entry=0, max_dte_for_entry=0)
+        tight_dte_config = RiskConfig(min_dte_for_entry=25, max_dte_for_entry=30)
         pipeline = SessionPipeline(
             _EntryChainProvider(),
             risk_config=tight_dte_config,
             tick_lock=NullTickLock(),
         )
         ctx = AgentContext(session_id="pipeline-entry-chain-04", dte=3)
-        result = await pipeline.run_tick(ctx)
+        with patch(
+            "src.orchestration.session_pipeline.select_expiry",
+            side_effect=ExpirySelectionError("no_expiry_within_dte_band"),
+        ):
+            result = await pipeline.run_tick(ctx)
 
         self.assertEqual(result.ctx.critic_decision.status, CriticStatus.REJECT)
         self.assertIn("selection_error:ExpirySelectionError", result.ctx.critic_decision.reason)

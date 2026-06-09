@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from src.config.index_contracts import IndexContract, resolve_index_contract
 from src.config.secrets import get_fyers_credentials, load_project_env
 from src.core.context import AgentContext, CriticStatus
 from src.data.fyers_provider import FyersMarketDataProvider
@@ -114,6 +115,74 @@ def _serialize_gatekeeper(ctx: AgentContext) -> dict[str, Any] | None:
     }
 
 
+def _final_outcome(ctx: AgentContext, *, exit_action: str | None) -> str:
+    if exit_action == ExitAction.EXIT_MARKET.value:
+        return "EXIT_MARKET"
+    strategy = ctx.strategy_decision.strategy if ctx.strategy_decision else None
+    if strategy is not None and strategy.value == "cash_no_trade":
+        return "NO_TRADE"
+    gatekeeper = ctx.gatekeeper_decision
+    if gatekeeper is not None and gatekeeper.verdict == GatekeeperVerdict.APPROVE:
+        return "WOULD_TRADE"
+    critic = ctx.critic_decision
+    if critic is not None and critic.status == CriticStatus.REJECT:
+        return "REJECTED"
+    if gatekeeper is not None and gatekeeper.verdict == GatekeeperVerdict.REJECT:
+        return "REJECTED"
+    return "NO_TRADE"
+
+
+def build_decision_summary(
+    ctx: AgentContext,
+    *,
+    exit_action: str | None = None,
+    index_contract: IndexContract | None = None,
+) -> str:
+    """Single-line human-readable decision for soak review logs."""
+    index_label = index_contract.key.upper() if index_contract else "NIFTY"
+    regime = ctx.regime_decision.value if ctx.regime_decision else "unknown"
+    strategy = (
+        ctx.strategy_decision.strategy.value
+        if ctx.strategy_decision
+        else "none"
+    )
+
+    if exit_action == ExitAction.EXIT_MARKET.value:
+        return f"{index_label} tick: EXIT_MARKET flatten triggered."
+
+    if strategy == "cash_no_trade":
+        return f"{index_label} tick: NO_TRADE — regime={regime} → cash_no_trade."
+
+    critic = ctx.critic_decision
+    if critic is not None and critic.status == CriticStatus.REJECT:
+        reason = critic.reason or "unspecified"
+        return (
+            f"{index_label} tick: REJECTED — regime={regime}, "
+            f"strategy={strategy}, critic={reason}."
+        )
+
+    gatekeeper = ctx.gatekeeper_decision
+    if gatekeeper is not None and gatekeeper.verdict == GatekeeperVerdict.REJECT:
+        reason = getattr(gatekeeper, "reason", "") or "unspecified"
+        rule = getattr(gatekeeper, "rule_id", None)
+        rule_label = rule.value if rule is not None else "unknown"
+        return (
+            f"{index_label} tick: REJECTED — regime={regime}, "
+            f"strategy={strategy}, gatekeeper={rule_label}: {reason}."
+        )
+
+    if gatekeeper is not None and gatekeeper.verdict == GatekeeperVerdict.APPROVE:
+        return (
+            f"{index_label} tick: WOULD_TRADE — regime={regime}, "
+            f"strategy={strategy}, DTE={ctx.dte}, gatekeeper=APPROVE."
+        )
+
+    return (
+        f"{index_label} tick: NO_TRADE — regime={regime}, "
+        f"strategy={strategy}, no approval path."
+    )
+
+
 def _serialize_open_position(ctx: AgentContext) -> dict[str, Any] | None:
     position = ctx.open_position
     if position is None:
@@ -134,12 +203,13 @@ def build_paper_tick_row(
     elapsed_ms: float,
     live_underlying_ltp: float | None,
     exit_action: str | None = None,
+    index_contract: IndexContract | None = None,
 ) -> dict[str, Any]:
     stale_distance: float | None = None
     if live_underlying_ltp is not None and ctx.feature_snapshot_price is not None:
         stale_distance = abs(live_underlying_ltp - ctx.feature_snapshot_price)
 
-    return {
+    row: dict[str, Any] = {
         "event": "paper_tick",
         "session_id": session_id,
         "timestamp": datetime.now(IST).isoformat(),
@@ -154,12 +224,25 @@ def build_paper_tick_row(
         "open_position": _serialize_open_position(ctx),
         "baseline_initialized": ctx.baseline_initialized,
         "feature_snapshot_price": ctx.feature_snapshot_price,
+        "trade_dte": ctx.dte,
         "stale_quote_distance": (
             round(stale_distance, 3) if stale_distance is not None else None
         ),
         "exit_action": exit_action,
         "elapsed_ms": round(elapsed_ms, 3),
+        "final_outcome": _final_outcome(ctx, exit_action=exit_action),
+        "decision_summary": build_decision_summary(
+            ctx,
+            exit_action=exit_action,
+            index_contract=index_contract,
+        ),
     }
+    if index_contract is not None:
+        row["index_key"] = index_contract.key
+        row["index_symbol"] = index_contract.symbol
+    if ctx.strategy_decision is not None:
+        row["supporting_signals"] = list(ctx.strategy_decision.supporting_signals)
+    return row
 
 
 def build_paper_soak_summary(stats: PaperSoakStats, *, session_id: str) -> dict[str, Any]:
@@ -209,6 +292,7 @@ class PaperSoakRunner:
         now_fn: Callable[[], datetime] | None = None,
         wall_now_fn: Callable[[], datetime] | None = None,
         memory_guard_enabled: bool = True,
+        index_contract: IndexContract | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._session_id = session_id
@@ -226,6 +310,7 @@ class PaperSoakRunner:
         self._heartbeat: JsonlHeartbeatWriter | None = None
         self._tick_trace: JsonlTickTraceWriter | None = None
         self._memory_guard_enabled = memory_guard_enabled
+        self._index_contract = index_contract
 
     def configure_observability(
         self,
@@ -314,6 +399,7 @@ class PaperSoakRunner:
                             elapsed_ms=elapsed_ms,
                             live_underlying_ltp=live_ltp,
                             exit_action=exit_action,
+                            index_contract=self._index_contract,
                         )
                     )
                     if self._tick_trace is not None:
@@ -397,6 +483,7 @@ class PaperSoakRunner:
         *,
         logger: PaperEventLogger | None = None,
         exercise_broker: bool = False,
+        index_symbol: str | None = None,
     ) -> PaperSoakRunner:
         load_project_env()
         app_id, access_token = get_fyers_credentials()
@@ -417,8 +504,11 @@ class PaperSoakRunner:
             if exercise_broker
             else NoOpExecutionPort()
         )
+        index_key = (index_symbol or os.getenv("PAPER_INDEX", "nifty")).strip()
+        index_contract = resolve_index_contract(index_key)
         pipeline = SessionPipeline(
             provider,
+            index_symbol=index_contract.symbol,
             tick_lock=FileTickLock(default_paper_tick_lock_path()),
             dry_run=True,
             paper_logger=paper_logger,
@@ -432,6 +522,7 @@ class PaperSoakRunner:
             logger=paper_logger,
             tick_seconds=tick_seconds,
             duration_hours=duration_hours,
+            index_contract=index_contract,
         )
         runner.configure_observability(
             heartbeat=JsonlHeartbeatWriter(default_heartbeat_path()),
@@ -467,14 +558,26 @@ async def _async_main(argv: list[str] | None = None) -> int:
             "Default is NoOp (quotes/greeks only)."
         ),
     )
+    parser.add_argument(
+        "--index",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Index contract for quotes/strikes: nifty (default), sensex, banknifty, "
+            "or a full Fyers symbol. Env: PAPER_INDEX."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.mock:
         from src.orchestration.mock_soak import build_mock_runner
 
-        runner = build_mock_runner(exercise_broker=args.broker)
+        runner = build_mock_runner(exercise_broker=args.broker, index_symbol=args.index)
     else:
-        runner = PaperSoakRunner.from_env(exercise_broker=args.broker)
+        runner = PaperSoakRunner.from_env(
+            exercise_broker=args.broker,
+            index_symbol=args.index,
+        )
     if args.hours is not None:
         runner._duration = timedelta(hours=args.hours)
     if args.tick_seconds is not None:

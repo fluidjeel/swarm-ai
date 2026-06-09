@@ -15,9 +15,11 @@ from src.agents.symbol_resolver import (
     ExpirySelectionError,
     NIFTY_INDEX_SYMBOL,
     StrikeSelectionError,
+    leg_dte_for_expiry,
     select_expiry,
     select_strategy_symbols,
 )
+from src.config.index_contracts import IndexContract, resolve_index_contract
 from src.config.risk_config import RiskConfig, load_risk_config
 from src.core.context import (
     AgentContext,
@@ -59,7 +61,7 @@ from src.risk.exit_engine import (
 )
 
 
-NIFTY_LOT_SIZE = 50
+DEFAULT_INDEX_SYMBOL = NIFTY_INDEX_SYMBOL
 _ENTRY_LEG_SIDES: dict[StrategyName, tuple[str, ...]] = {
     StrategyName.IRON_CONDOR: ("BUY", "SELL", "SELL", "BUY"),
     StrategyName.BULL_CALL_SPREAD: ("BUY", "SELL"),
@@ -113,7 +115,8 @@ class SessionPipeline:
         exit_engine: ExitEngine | None = None,
         request_timeout_sec: float = 30.0,
         pcr_history_path: Path | None = None,
-        nifty_symbol: str = "NSE:NIFTY50-INDEX",
+        index_symbol: str = DEFAULT_INDEX_SYMBOL,
+        nifty_symbol: str | None = None,
         session_open_vix: float | None = None,
         tick_lock: TickLock | None = None,
         enforce_tick_lock: bool = True,
@@ -134,7 +137,9 @@ class SessionPipeline:
             bind_risk(self._risk_config)
         self._request_timeout_sec = request_timeout_sec
         self._pcr_history_path = pcr_history_path
-        self._nifty_symbol = nifty_symbol
+        resolved_symbol = index_symbol if nifty_symbol is None else nifty_symbol
+        self._index_contract: IndexContract = resolve_index_contract(resolved_symbol)
+        self._index_symbol = self._index_contract.symbol
         self._session_open_vix = session_open_vix
         self._boot_logger = boot_logger
         self._dry_run = dry_run
@@ -199,7 +204,7 @@ class SessionPipeline:
         # Baseline from broker LTP at boot — not the next 5-min bar close.
         # If LTP fetch fails, boot continues; first tick will retry baseline init.
         try:
-            ltp = await self._provider.get_index_ltp(self._nifty_symbol)
+            ltp = await self._provider.get_index_ltp(self._index_symbol)
             ctx = ctx.update(
                 feature_snapshot_price=float(ltp),
                 baseline_initialized=True,
@@ -363,9 +368,15 @@ class SessionPipeline:
             selected_legs: list[OptionGreeks] = []
             per_leg_quotes: dict[str, Quote] = {}
             try:
-                expiry_ts = select_expiry(ctx, config=self._risk_config)
+                expiry_ts = select_expiry(
+                    ctx,
+                    config=self._risk_config,
+                    index_symbol=self._index_symbol,
+                )
+                trade_dte = leg_dte_for_expiry(expiry_ts)
+                ctx = ctx.update(dte=trade_dte)
                 greeks_list = await self._provider.get_option_chain_greeks(
-                    NIFTY_INDEX_SYMBOL,
+                    self._index_symbol,
                     expiry_ts,
                 )
                 selected_legs = select_strategy_symbols(
@@ -374,7 +385,7 @@ class SessionPipeline:
                     config=self._risk_config,
                 )
                 live_underlying_ltp = float(
-                    await self._provider.get_index_ltp(NIFTY_INDEX_SYMBOL)
+                    await self._provider.get_index_ltp(self._index_symbol)
                 )
 
                 for leg_greek in selected_legs:
@@ -454,7 +465,7 @@ class SessionPipeline:
                 leg_id=leg_id,
                 symbol=leg_greek.symbol,
                 side=side,  # type: ignore[arg-type]
-                qty=NIFTY_LOT_SIZE,
+                qty=self._index_contract.lot_size,
                 tag=idem_key(
                     tick_timestamp=tick_timestamp,
                     leg_id=leg_id,
@@ -574,7 +585,8 @@ class SessionPipeline:
         try:
             payload = await compute_feature_payload(
                 self._provider,
-                nifty_symbol=self._nifty_symbol,
+                option_symbol=self._index_symbol,
+                nifty_symbol=self._index_symbol,
                 request_timeout_sec=self._request_timeout_sec,
                 pcr_history_path=self._pcr_history_path,
             )
@@ -585,7 +597,7 @@ class SessionPipeline:
             ) from exc
 
         bars = await self._provider.get_index_ohlcv(
-            self._nifty_symbol,
+            self._index_symbol,
             resolution="5",
             lookback_bars=2,
         )
