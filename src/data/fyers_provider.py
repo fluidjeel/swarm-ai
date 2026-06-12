@@ -37,6 +37,13 @@ DEFAULT_VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
 DEFAULT_NIFTY_INDEX = "NSE:NIFTY50-INDEX"
 DEFAULT_REQUEST_TIMEOUT_SEC = 15.0
 FYERS_QUOTES_BATCH_SIZE = 50
+OPT_CHAIN_STRIKE_BOUND = 15
+
+_DEFAULT_STRIKE_STEP_BY_SYMBOL: dict[str, float] = {
+    "NSE:NIFTY50-INDEX": 50.0,
+    "NSE:NIFTYBANK-INDEX": 100.0,
+    "BSE:SENSEX-INDEX": 100.0,
+}
 
 
 def _require_fyers_credentials() -> tuple[str, str]:
@@ -174,6 +181,65 @@ def _chunked(items: list[str], size: int) -> list[list[str]]:
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
+def _row_strike_price(row: dict[str, Any]) -> float | None:
+    strike_raw = row.get("strike_price", row.get("strike"))
+    if strike_raw is None:
+        return None
+    try:
+        return float(strike_raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_strike_step(chain: list[dict[str, Any]], symbol: str) -> float:
+    configured = _DEFAULT_STRIKE_STEP_BY_SYMBOL.get(symbol.upper())
+    if configured is not None:
+        return configured
+
+    strikes = sorted(
+        strike
+        for row in chain
+        if isinstance(row, dict)
+        for strike in [_row_strike_price(row)]
+        if strike is not None
+    )
+    if len(strikes) < 2:
+        return 50.0
+
+    diffs = [right - left for left, right in zip(strikes, strikes[1:]) if right > left]
+    return min(diffs) if diffs else 50.0
+
+
+def _filter_chain_rows_near_spot(
+    chain: list[dict[str, Any]],
+    *,
+    spot: float,
+    symbol: str,
+    strike_bound: int = OPT_CHAIN_STRIKE_BOUND,
+) -> list[dict[str, Any]]:
+    """Keep only strikes within ±strike_bound steps of the underlying spot."""
+    step = _infer_strike_step(chain, symbol)
+    min_strike = spot - strike_bound * step
+    max_strike = spot + strike_bound * step
+
+    filtered: list[dict[str, Any]] = []
+    for row in chain:
+        if not isinstance(row, dict):
+            continue
+        strike = _row_strike_price(row)
+        if strike is None:
+            continue
+        if min_strike <= strike <= max_strike:
+            filtered.append(row)
+
+    if not filtered:
+        raise MarketDataError(
+            f"No option chain rows within ±{strike_bound} strikes of spot {spot:.2f} "
+            f"for {symbol} (step={step})."
+        )
+    return filtered
+
+
 def _sum_option_oi(chain: list[dict[str, Any]]) -> tuple[int, int, int | None]:
     call_oi = 0
     put_oi = 0
@@ -217,6 +283,7 @@ def _parse_option_chain_pcr(
     response: dict[str, Any],
     *,
     symbol: str,
+    spot: float | None = None,
 ) -> OptionChainPcr:
     data = response.get("data")
     if not isinstance(data, dict):
@@ -225,6 +292,9 @@ def _parse_option_chain_pcr(
     chain = data.get("optionsChain")
     if not isinstance(chain, list) or not chain:
         raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
+
+    if spot is not None:
+        chain = _filter_chain_rows_near_spot(chain, spot=spot, symbol=symbol)
 
     call_oi, put_oi, expiry_timestamp = _sum_option_oi(chain)
     if expiry_timestamp is None:
@@ -552,6 +622,7 @@ def _parse_option_chain_quotes(
     *,
     symbol: str,
     expiry_ts: int,
+    spot: float | None = None,
 ) -> list[OptionQuote]:
     data = response.get("data")
     if not isinstance(data, dict):
@@ -560,6 +631,9 @@ def _parse_option_chain_quotes(
     chain = data.get("optionsChain")
     if not isinstance(chain, list) or not chain:
         raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
+
+    if spot is not None:
+        chain = _filter_chain_rows_near_spot(chain, spot=spot, symbol=symbol)
 
     quotes: list[OptionQuote] = []
     for row in chain:
@@ -785,11 +859,12 @@ class FyersMarketDataProvider(MarketDataProvider):
         self,
         symbol: str = "NSE:NIFTY50-INDEX",
         *,
-        strikecount: int = 50,
+        strikecount: int = OPT_CHAIN_STRIKE_BOUND,
     ) -> OptionChainPcr:
+        spot = await self.get_index_ltp(symbol)
         payload = {
             "symbol": symbol,
-            "strikecount": strikecount,
+            "strikecount": min(strikecount, OPT_CHAIN_STRIKE_BOUND),
             "timestamp": "",
         }
 
@@ -799,7 +874,7 @@ class FyersMarketDataProvider(MarketDataProvider):
                 client.optionchain(payload),
                 context=f"optionchain({symbol})",
             )
-            return _parse_option_chain_pcr(response, symbol=symbol)
+            return _parse_option_chain_pcr(response, symbol=symbol, spot=spot)
 
         return await self._call_with_timeout(_fetch, context=f"get_option_chain_pcr({symbol})")
 
@@ -852,9 +927,10 @@ class FyersMarketDataProvider(MarketDataProvider):
         symbol: str,
         expiry_ts: int,
     ) -> list[OptionGreeks]:
+        spot = await self.get_index_ltp(symbol)
         payload = {
             "symbol": symbol,
-            "strikecount": 50,
+            "strikecount": OPT_CHAIN_STRIKE_BOUND,
             "timestamp": str(expiry_ts),
         }
 
@@ -869,8 +945,12 @@ class FyersMarketDataProvider(MarketDataProvider):
             _fetch_chain,
             context=f"get_option_chain_greeks({symbol})",
         )
-        quotes = _parse_option_chain_quotes(response, symbol=symbol, expiry_ts=expiry_ts)
-        spot = await self.get_index_ltp(symbol)
+        quotes = _parse_option_chain_quotes(
+            response,
+            symbol=symbol,
+            expiry_ts=expiry_ts,
+            spot=spot,
+        )
         config = self._risk_config or load_risk_config()
         return _enrich_with_local_greeks(
             quotes,

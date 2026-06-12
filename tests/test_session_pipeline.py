@@ -771,6 +771,27 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
 
         mock_exit.assert_not_called()
 
+    async def test_run_tick_persists_ddb_tick_trace(self) -> None:
+        rows: list[dict] = []
+
+        class _Writer:
+            def write_tick(self, row: dict) -> None:
+                rows.append(row)
+
+        pipeline = SessionPipeline(
+            _FakeProvider(),
+            tick_lock=NullTickLock(),
+            tick_trace_writer=_Writer(),
+            enable_ddb_tick_trace=False,
+        )
+        ctx = AgentContext(session_id="pipeline-trace-01", dte=3)
+        await pipeline.run_tick(ctx)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["session_id"], "pipeline-trace-01")
+        self.assertEqual(rows[0]["tick_number"], 1)
+        self.assertEqual(rows[0]["event"], "tick_trace")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
+
+logger = logging.getLogger(__name__)
 
 from src.agents.pre_trade_critic import validate_pre_trade
 from src.agents.regime_classifier import classify_regime
@@ -53,8 +58,13 @@ from src.orchestration.context_adapters import (
     opening_regime_to_feature_payload,
     sync_circuit_breaker,
 )
-from src.orchestration.session_clock import IST, is_session_start_allowed
+from src.orchestration.session_clock import IST, current_phase, is_session_start_allowed
 from src.orchestration.tick_lock import FileTickLock, NullTickLock, TickLock, TickLockError
+from src.observability.tick_trace import (
+    TickTraceWriter,
+    build_tick_trace_row,
+    DynamoDBTickTraceWriter,
+)
 from src.risk.exit_engine import (
     CreditSpreadPosition,
     ExitAction,
@@ -69,6 +79,14 @@ _ENTRY_LEG_SIDES: dict[StrategyName, tuple[str, ...]] = {
     StrategyName.BULL_CALL_SPREAD: ("BUY", "SELL"),
     StrategyName.BEAR_PUT_SPREAD: ("BUY", "SELL"),
 }
+
+
+def _default_tick_trace_writer() -> TickTraceWriter | None:
+    if os.getenv("A2A_DISABLE_DDB_TRACES", "").lower() in ("1", "true", "yes"):
+        return None
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    return DynamoDBTickTraceWriter()
 
 
 class SessionPipelineError(RuntimeError):
@@ -129,6 +147,8 @@ class SessionPipeline:
         execution_port: ExecutionPort | None = None,
         broker_sync: bool = False,
         memory_guard_enabled: bool = False,
+        tick_trace_writer: TickTraceWriter | None = None,
+        enable_ddb_tick_trace: bool = True,
     ) -> None:
         self._provider = provider
         self._exit_engine = exit_engine or ExitEngine()
@@ -148,6 +168,10 @@ class SessionPipeline:
         self._paper_logger = paper_logger
         self._broker_sync = broker_sync
         self._memory_guard_enabled = memory_guard_enabled
+        self._tick_trace_writer = tick_trace_writer
+        if self._tick_trace_writer is None and enable_ddb_tick_trace:
+            self._tick_trace_writer = _default_tick_trace_writer()
+        self._tick_number = 0
         if tick_lock is not None:
             self._tick_lock = tick_lock
         elif enforce_tick_lock:
@@ -158,6 +182,39 @@ class SessionPipeline:
     def release_tick_lock(self) -> None:
         """Release the tick lock (used by paper-mode shutdown)."""
         self._tick_lock.release()
+
+    async def _persist_tick_trace(
+        self,
+        ctx: AgentContext,
+        *,
+        elapsed_ms: float,
+        exit_decision: ExitDecision | None,
+    ) -> None:
+        if self._tick_trace_writer is None:
+            return
+
+        self._tick_number += 1
+        row = build_tick_trace_row(
+            session_id=ctx.session_id,
+            tick_number=self._tick_number,
+            ctx=ctx,
+            elapsed_ms=elapsed_ms,
+            phase=current_phase(datetime.now(IST)).value,
+        )
+        if exit_decision is not None:
+            row["exit_action"] = exit_decision.action.value
+            row["exit_reason"] = exit_decision.reason
+            row["exit_rule_id"] = exit_decision.rule_id
+
+        try:
+            await asyncio.to_thread(self._tick_trace_writer.write_tick, row)
+        except Exception:
+            logger.warning(
+                "Failed to persist tick trace for session=%s tick=%s",
+                ctx.session_id,
+                self._tick_number,
+                exc_info=True,
+            )
 
     async def bootstrap_session(
         self,
@@ -261,6 +318,9 @@ class SessionPipeline:
         4. If an open position exists, run Exit Engine; flatten on EXIT_MARKET.
         """
         tick_start = time.perf_counter()
+        exit_decision: ExitDecision | None = None
+        live_underlying_ltp: float | None = None
+        tick_timestamp = datetime.now(IST).isoformat()
         try:
             self._tick_lock.acquire(blocking=False)
         except TickLockError as exc:
@@ -275,8 +335,6 @@ class SessionPipeline:
             except MemoryGuardError as exc:
                 raise SessionPipelineError(str(exc), code="MEMORY_GUARD") from exc
 
-        live_underlying_ltp: float | None = None
-        tick_timestamp = datetime.now(IST).isoformat()
         try:
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx, shared_market=shared_market)
@@ -347,6 +405,12 @@ class SessionPipeline:
                 elapsed_ms=(time.perf_counter() - tick_start) * 1000,
             )
         finally:
+            elapsed_ms = (time.perf_counter() - tick_start) * 1000
+            await self._persist_tick_trace(
+                ctx,
+                elapsed_ms=elapsed_ms,
+                exit_decision=exit_decision,
+            )
             self._tick_lock.release()
 
     async def _run_entry_chain(

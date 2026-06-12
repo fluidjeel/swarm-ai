@@ -9,6 +9,8 @@ from src.data.base_provider import UntaggedPositionError
 from src.config.risk_config import RiskConfig
 from src.data.fyers_provider import (
     FyersMarketDataProvider,
+    OPT_CHAIN_STRIKE_BOUND,
+    _filter_chain_rows_near_spot,
     _parse_breadth_from_quotes,
     _parse_history_candles,
     _parse_option_chain_pcr,
@@ -49,6 +51,31 @@ class FyersProviderParsingTests(unittest.TestCase):
         self.assertEqual(pcr.pcr, 1.0)
         self.assertEqual(pcr.call_oi, 150)
         self.assertEqual(pcr.put_oi, 150)
+
+    def test_filter_chain_rows_near_spot_excludes_deep_otm(self) -> None:
+        chain = [
+            {"option_type": "CE", "oi": 100, "strike_price": 24500, "expiry": 1_810_000_000},
+            {"option_type": "PE", "oi": 100, "strike_price": 24500, "expiry": 1_810_000_000},
+            {"option_type": "CE", "oi": 200, "strike_price": 25000, "expiry": 1_810_000_000},
+            {"option_type": "PE", "oi": 200, "strike_price": 25000, "expiry": 1_810_000_000},
+            {"option_type": "CE", "oi": 50, "strike_price": 30000, "expiry": 1_810_000_000},
+        ]
+        filtered = _filter_chain_rows_near_spot(
+            chain,
+            spot=25000.0,
+            symbol="NSE:NIFTY50-INDEX",
+        )
+        strikes = {row["strike_price"] for row in filtered}
+        self.assertIn(25000, strikes)
+        self.assertNotIn(30000, strikes)
+
+        pcr = _parse_option_chain_pcr(
+            {"data": {"optionsChain": chain}},
+            symbol="NSE:NIFTY50-INDEX",
+            spot=25000.0,
+        )
+        self.assertEqual(pcr.call_oi, 300)
+        self.assertEqual(pcr.put_oi, 300)
 
     def test_parse_breadth_from_quotes(self) -> None:
         response = {
@@ -241,6 +268,7 @@ class FyersOptionChainGreeksTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(captured_payload["timestamp"], str(expiry_ts))
+        self.assertEqual(captured_payload["strikecount"], OPT_CHAIN_STRIKE_BOUND)
         self.assertEqual(len(greeks), 1)
         self.assertEqual(greeks[0].symbol, "NSE:NIFTY24JUN25000CE")
         self.assertIsNotNone(greeks[0].delta)
