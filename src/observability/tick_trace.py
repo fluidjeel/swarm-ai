@@ -82,6 +82,7 @@ def build_tick_trace_row(
     return {
         "event": "tick_trace",
         "session_id": session_id,
+        "trace_id": ctx.trace_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tick_number": tick_number,
         "phase": phase,

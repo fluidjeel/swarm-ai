@@ -159,6 +159,15 @@ class AgentContext(StrictModel):
     )
 
     session_id: str = Field(..., min_length=8, max_length=128)
+    trace_id: str | None = Field(
+        default=None,
+        description=(
+            "Per-tick correlation id (uuid4 hex). Minted at the top of "
+            "SessionPipeline.run_tick and stamped onto every downstream trace row "
+            "(feature -> regime -> strategy -> critic -> gatekeeper -> order -> "
+            "fill -> exit) so a single decision chain can be reconstructed."
+        ),
+    )
 
     # Static per session
     overnight_context: OvernightContext = Field(default_factory=OvernightContext)

@@ -7,6 +7,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
@@ -419,6 +420,7 @@ class SessionPipeline:
                 raise SessionPipelineError(str(exc), code="MEMORY_GUARD") from exc
 
         try:
+            ctx = ctx.update(trace_id=uuid4().hex)
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx, shared_market=shared_market)
             if self._broker_sync:
@@ -431,6 +433,7 @@ class SessionPipeline:
                             {
                                 "event": "BROKER_POSITION_SYNC",
                                 "session_id": ctx.session_id,
+                                "trace_id": ctx.trace_id,
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "prior_symbol": prior_symbol,
                                 "current_symbol": current_symbol,
@@ -673,6 +676,7 @@ class SessionPipeline:
             {
                 "event": "PAPER_ORDER_ACK",
                 "session_id": ctx.session_id,
+                "trace_id": ctx.trace_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "leg_id": intent.leg_id,
                 "symbol": intent.symbol,
@@ -695,6 +699,7 @@ class SessionPipeline:
             {
                 "event": "PAPER_APPROVE",
                 "session_id": ctx.session_id,
+                "trace_id": ctx.trace_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "regime_decision": (
                     ctx.regime_decision.value if ctx.regime_decision else None
@@ -733,6 +738,7 @@ class SessionPipeline:
         row: dict[str, Any] = {
             "event": "PAPER_EXIT",
             "session_id": ctx.session_id,
+            "trace_id": ctx.trace_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "open_position": (
                 {

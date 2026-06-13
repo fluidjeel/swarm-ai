@@ -604,6 +604,49 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ctx.baseline_initialized)
         self.assertEqual(result.ctx.feature_snapshot_price, 102.0)
 
+    async def test_run_tick_mints_trace_id_and_stamps_traces(self) -> None:
+        rows: list[dict] = []
+
+        class _Logger:
+            def log_paper_row(self, row: dict) -> None:
+                rows.append(row)
+
+        trace_rows: list[dict] = []
+
+        class _TraceWriter:
+            def write_tick(self, row: dict) -> None:
+                trace_rows.append(row)
+
+        pipeline = SessionPipeline(
+            _EntryChainProvider(),
+            tick_lock=NullTickLock(),
+            dry_run=True,
+            paper_logger=_Logger(),
+            tick_trace_writer=_TraceWriter(),
+        )
+        ctx = AgentContext(session_id="pipeline-traceid-01", dte=3)
+        result = await pipeline.run_tick(ctx)
+
+        self.assertIsNotNone(result.ctx.trace_id)
+        self.assertEqual(len(result.ctx.trace_id), 32)
+        # Tick trace carries the same trace_id as the context decision chain.
+        self.assertTrue(trace_rows)
+        self.assertEqual(trace_rows[-1]["trace_id"], result.ctx.trace_id)
+        # Paper rows for this tick share the correlation id.
+        approve_rows = [r for r in rows if r["event"] == "PAPER_APPROVE"]
+        self.assertTrue(approve_rows)
+        for row in approve_rows:
+            self.assertEqual(row["trace_id"], result.ctx.trace_id)
+
+    async def test_run_tick_trace_id_changes_each_tick(self) -> None:
+        pipeline = SessionPipeline(_EntryChainProvider(), tick_lock=NullTickLock())
+        ctx = AgentContext(session_id="pipeline-traceid-02", dte=3)
+        first = await pipeline.run_tick(ctx)
+        second = await pipeline.run_tick(first.ctx)
+        self.assertIsNotNone(first.ctx.trace_id)
+        self.assertIsNotNone(second.ctx.trace_id)
+        self.assertNotEqual(first.ctx.trace_id, second.ctx.trace_id)
+
     async def test_run_tick_entry_chain_populates_agent_decisions(self) -> None:
         pipeline = SessionPipeline(_EntryChainProvider(), tick_lock=NullTickLock())
         ctx = AgentContext(session_id="pipeline-entry-chain-01", dte=3)
