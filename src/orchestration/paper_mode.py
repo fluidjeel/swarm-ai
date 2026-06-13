@@ -498,6 +498,10 @@ class PaperSoakRunner:
 
                 await self._sleep(self._tick_seconds)
         finally:
+            had_open = ctx.open_position is not None
+            ctx = await self._pipeline.flatten_open_position_for_shutdown(ctx)
+            if had_open and ctx.open_position is None:
+                self.record_exit()
             self._pipeline.release_tick_lock()
 
         summary = build_paper_soak_summary(self._stats, session_id=self._session_id)
@@ -699,6 +703,11 @@ class MultiIndexPaperSoakRunner:
                     )
                 await self._sleep(self._tick_seconds)
         finally:
+            for lane in self._lanes:
+                had_open = lane.ctx.open_position is not None
+                lane.ctx = await lane.pipeline.flatten_open_position_for_shutdown(lane.ctx)
+                if had_open and lane.ctx.open_position is None:
+                    lane.stats.paper_exits += 1
             for lane in self._lanes:
                 lane.pipeline.release_tick_lock()
 

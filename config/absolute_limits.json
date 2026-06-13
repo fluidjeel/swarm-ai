@@ -5,5 +5,8 @@
   "max_gamma": { "lower": 0.001, "upper": 0.20 },
   "vix_choppy_threshold": { "lower": 10.0, "upper": 35.0 },
   "pcr_bull_threshold": { "lower": -0.50, "upper": 0.50 },
-  "ad_trend_up_threshold": { "lower": 0.5, "upper": 3.0 }
+  "ad_trend_up_threshold": { "lower": 0.5, "upper": 3.0 },
+  "iv_percentile_min": { "lower": 5.0, "upper": 80.0 },
+  "vix_low_vol_floor": { "lower": 8.0, "upper": 20.0 },
+  "credit_stop_multiplier": { "lower": 1.5, "upper": 2.0 }
 }

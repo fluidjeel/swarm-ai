@@ -24,7 +24,11 @@ from src.config.risk_config import RiskConfig
 from src.risk.gatekeeper import GatekeeperVerdict
 from src.features.feature_engine import FeatureEngineErrorCode
 from src.execution.mock_port import MockExecutionPort
-from src.orchestration.session_pipeline import SessionPipeline, SessionPipelineError
+from src.orchestration.session_pipeline import (
+    DURATION_LIMIT_FLATTEN_EVENT,
+    SessionPipeline,
+    SessionPipelineError,
+)
 from src.orchestration.session_clock import IST
 from src.orchestration.tick_lock import FileTickLock, NullTickLock
 from src.risk.exit_engine import (
@@ -169,10 +173,15 @@ def _iron_condor_open_position() -> OpenPosition:
         symbol="iron_condor_summary",
         strategy="iron_condor",
         lots=1,
-        entry_price=87.5,
+        entry_price=70.0,
+        entry_cash_flow_inr=3500.0,
         strategy_id="iron_condor",
         legs=legs,
     )
+
+
+def _iron_condor_entry_quotes() -> dict[str, float]:
+    return {leg.symbol: leg.entry_price for leg in _iron_condor_open_position().legs}
 
 
 class _RecordingPaperLogger:
@@ -189,6 +198,13 @@ def _sample_bars() -> list[dict]:
         {"timestamp": 2, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1},
         {"timestamp": 3, "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1},
     ]
+
+
+def _iron_condor_entry_ltp(symbol: str) -> float:
+    """Wing LTPs that yield ~INR 4000 net credit at 50 lot (clears friction EV gate)."""
+    if "24500PE" in symbol or "25500CE" in symbol:
+        return 80.0
+    return 120.0
 
 
 def _iron_condor_greeks_for_pipeline() -> list[OptionGreeks]:
@@ -264,6 +280,17 @@ class _EntryChainProvider(_FakeProvider):
 
     async def get_option_chain_greeks(self, symbol: str, expiry_ts: int) -> list[OptionGreeks]:
         return _iron_condor_greeks_for_pipeline()
+
+    async def get_bid_ask(self, symbol: str) -> Quote:
+        ltp = _iron_condor_entry_ltp(symbol)
+        return Quote(
+            symbol=symbol,
+            bid=ltp - 1.0,
+            ask=ltp + 1.0,
+            ltp=ltp,
+            spread_pct=0.02,
+            underlying_ltp=102.0,
+        )
 
 
 class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -369,10 +396,9 @@ class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_tick_exits_multi_leg_iron_condor_with_all_leg_intents(self) -> None:
         open_position = _iron_condor_open_position()
         short_leg = "NSE:NIFTY24JUN24100PE"
-        provider = _MultiLegQuoteProvider(
-            ask_by_symbol={short_leg: 40.0},
-            default_ask=80.0,
-        )
+        asks = _iron_condor_entry_quotes()
+        asks[short_leg] = 40.0
+        provider = _MultiLegQuoteProvider(ask_by_symbol=asks)
         ctx = AgentContext(
             session_id="pipeline-session-04b",
             open_position=open_position,
@@ -398,7 +424,7 @@ class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
             open_position=_iron_condor_open_position(),
         )
         pipeline = SessionPipeline(
-            _MultiLegQuoteProvider(default_ask=80.0),
+            _MultiLegQuoteProvider(ask_by_symbol=_iron_condor_entry_quotes()),
             session_open_vix=14.0,
             tick_lock=NullTickLock(),
         )
@@ -436,7 +462,7 @@ class SessionPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = ExitEngine()
         pipeline = SessionPipeline(
-            _MultiLegQuoteProvider(default_ask=80.0),
+            _MultiLegQuoteProvider(ask_by_symbol=_iron_condor_entry_quotes()),
             exit_engine=engine,
             session_open_vix=14.0,
             tick_lock=NullTickLock(),
@@ -791,6 +817,28 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["session_id"], "pipeline-trace-01")
         self.assertEqual(rows[0]["tick_number"], 1)
         self.assertEqual(rows[0]["event"], "tick_trace")
+
+    async def test_flatten_open_position_for_shutdown_clears_zombie(self) -> None:
+        logger = _RecordingPaperLogger()
+        port = MockExecutionPort()
+        pipeline = SessionPipeline(
+            _FakeProvider(),
+            tick_lock=NullTickLock(),
+            dry_run=True,
+            paper_logger=logger,
+            execution_port=port,
+        )
+        ctx = AgentContext(
+            session_id="pipeline-shutdown-01",
+            open_position=_iron_condor_open_position(),
+        )
+        result_ctx = await pipeline.flatten_open_position_for_shutdown(ctx)
+
+        self.assertIsNone(result_ctx.open_position)
+        self.assertEqual(len(port.flatten_calls), 1)
+        events = [row["event"] for row in logger.rows]
+        self.assertIn(DURATION_LIMIT_FLATTEN_EVENT, events)
+        self.assertIn("PAPER_EXIT", events)
 
 
 if __name__ == "__main__":

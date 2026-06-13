@@ -19,3 +19,10 @@ secrets/
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime / soak artifacts
+logs/
+*.log
+.tmp_ssm_*.json
+.vscode/
+cline_demo.py

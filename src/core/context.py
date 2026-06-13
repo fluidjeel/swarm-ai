@@ -130,6 +130,10 @@ class OpenPosition(StrictModel):
         default=None,
         description="All legs when this row is a multi-leg summary position.",
     )
+    entry_cash_flow_inr: float | None = Field(
+        default=None,
+        description="Signed net premium at entry in INR (+ credit, - debit).",
+    )
 
     @field_validator("strategy", mode="before")
     @classmethod

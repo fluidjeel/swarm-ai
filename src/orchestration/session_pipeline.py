@@ -40,6 +40,12 @@ from src.execution.noop_port import NoOpExecutionPort
 from src.execution.port import ExecutionFailedError, ExecutionPort, LegActionIntent, OrderAck, idem_key
 from src.orchestration.runtime_guards import MemoryGuardError, check_memory_usage
 from src.data.base_provider import FyersAuthError, MarketDataError, MarketDataProvider, OhlcvBar, Quote
+from src.risk.friction import (
+    ENTRY_LEG_SIDES,
+    compute_entry_credit_inr,
+    compute_exit_close_cost_inr,
+    estimate_max_profit_inr,
+)
 from src.risk.gatekeeper import GatekeeperVerdict, evaluate_from_context
 from src.features.feature_engine import (
     FeatureEngineError,
@@ -74,11 +80,9 @@ from src.risk.exit_engine import (
 
 
 DEFAULT_INDEX_SYMBOL = NIFTY_INDEX_SYMBOL
-_ENTRY_LEG_SIDES: dict[StrategyName, tuple[str, ...]] = {
-    StrategyName.IRON_CONDOR: ("BUY", "SELL", "SELL", "BUY"),
-    StrategyName.BULL_CALL_SPREAD: ("BUY", "SELL"),
-    StrategyName.BEAR_PUT_SPREAD: ("BUY", "SELL"),
-}
+DURATION_LIMIT_FLATTEN_RULE = "duration_limit_emergency_flatten"
+DURATION_LIMIT_FLATTEN_REASON = "Duration-Limit Emergency Flatten."
+DURATION_LIMIT_FLATTEN_EVENT = "duration_limit_emergency_flatten"
 
 
 def _default_tick_trace_writer() -> TickTraceWriter | None:
@@ -110,6 +114,12 @@ class SessionTickResult:
     exit_decision: ExitDecision | None = None
     live_underlying_ltp: float | None = None
     elapsed_ms: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExitEvaluationResult:
+    decision: ExitDecision
+    per_leg_quotes: dict[str, Quote] | None = None
 
 
 class BootEventWriter(Protocol):
@@ -151,9 +161,11 @@ class SessionPipeline:
         enable_ddb_tick_trace: bool = True,
     ) -> None:
         self._provider = provider
-        self._exit_engine = exit_engine or ExitEngine()
-        self._execution_port = execution_port or NoOpExecutionPort()
         self._risk_config = risk_config or load_risk_config()
+        self._exit_engine = exit_engine or ExitEngine(
+            credit_stop_multiplier=self._risk_config.credit_stop_multiplier,
+        )
+        self._execution_port = execution_port or NoOpExecutionPort()
         bind_risk = getattr(self._provider, "bind_risk_config", None)
         if callable(bind_risk):
             bind_risk(self._risk_config)
@@ -182,6 +194,77 @@ class SessionPipeline:
     def release_tick_lock(self) -> None:
         """Release the tick lock (used by paper-mode shutdown)."""
         self._tick_lock.release()
+
+    async def flatten_open_position_for_shutdown(self, ctx: AgentContext) -> AgentContext:
+        """
+        Mandatory flatten before session teardown (soak duration limit / graceful stop).
+
+        Ensures no simulated risk remains in memory when the process exits.
+        """
+        position = ctx.open_position
+        if position is None:
+            return ctx
+
+        exit_decision = self._build_duration_limit_flatten_decision(position)
+        self._log_duration_limit_flatten(ctx, exit_decision)
+        try:
+            await self._execution_port.flatten_position(position)
+        except LegFailedError:
+            logger.warning(
+                "Duration-limit flatten failed for session=%s symbol=%s",
+                ctx.session_id,
+                position.symbol,
+                exc_info=True,
+            )
+            return ctx.update(execution_halted=True)
+
+        self._session_open_vix = None
+        return ctx.update(open_position=None)
+
+    def _build_duration_limit_flatten_decision(self, position: OpenPosition) -> ExitDecision:
+        base = self._exit_engine.build_emergency_flatten_decision(position)
+        return ExitDecision(
+            action=base.action,
+            reason=DURATION_LIMIT_FLATTEN_REASON,
+            rule_id=DURATION_LIMIT_FLATTEN_RULE,
+            leg_action_intents=base.leg_action_intents,
+        )
+
+    def _log_duration_limit_flatten(
+        self,
+        ctx: AgentContext,
+        exit_decision: ExitDecision,
+    ) -> None:
+        if self._paper_logger is None:
+            return
+        self._paper_logger.log_paper_row(
+            {
+                "event": DURATION_LIMIT_FLATTEN_EVENT,
+                "session_id": ctx.session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "detail": DURATION_LIMIT_FLATTEN_REASON,
+                "open_position": (
+                    {
+                        "symbol": ctx.open_position.symbol,
+                        "strategy": ctx.open_position.strategy,
+                    }
+                    if ctx.open_position
+                    else None
+                ),
+                "exit_action": exit_decision.action.value,
+                "exit_reason": exit_decision.reason,
+                "rule_id": exit_decision.rule_id,
+                "leg_action_intents": [
+                    {
+                        "symbol": intent.symbol,
+                        "action": intent.action,
+                        "leg_id": intent.leg_id,
+                    }
+                    for intent in exit_decision.leg_action_intents
+                ],
+            }
+        )
+        self._maybe_log_paper_exit(ctx, exit_decision, per_leg_quotes=None)
 
     async def _persist_tick_trace(
         self,
@@ -375,12 +458,13 @@ class SessionPipeline:
                     elapsed_ms=(time.perf_counter() - tick_start) * 1000,
                 )
 
-            exit_decision = await self._evaluate_exit(
+            exit_eval = await self._evaluate_exit(
                 ctx,
                 credit_spread_position=credit_spread_position,
                 nifty_bars=nifty_bars,
                 session_open_vix=session_open_vix,
             )
+            exit_decision = exit_eval.decision
 
             if exit_decision.leg_action_intents and not self._dry_run:
                 ctx = ctx.update(
@@ -388,7 +472,11 @@ class SessionPipeline:
                 )
 
             if exit_decision.action == ExitAction.EXIT_MARKET:
-                self._maybe_log_paper_exit(ctx, exit_decision)
+                self._maybe_log_paper_exit(
+                    ctx,
+                    exit_decision,
+                    per_leg_quotes=exit_eval.per_leg_quotes,
+                )
                 try:
                     if ctx.open_position is not None:
                         await self._execution_port.flatten_position(ctx.open_position)
@@ -487,7 +575,21 @@ class SessionPipeline:
                         reason=f"broker_error:{type(exc).__name__}",
                     )
                 )
-            ctx = evaluate_from_context(ctx, config=self._risk_config)
+            ctx = evaluate_from_context(
+                ctx,
+                config=self._risk_config,
+                estimated_max_profit_inr=(
+                    estimate_max_profit_inr(
+                        strategy,
+                        selected_legs=selected_legs,
+                        per_leg_quotes=per_leg_quotes,
+                        lot_size=self._index_contract.lot_size,
+                    )
+                    if selected_legs and per_leg_quotes
+                    else None
+                ),
+                leg_count=len(selected_legs) if selected_legs else None,
+            )
             gatekeeper = ctx.gatekeeper_decision
             if (
                 self._dry_run
@@ -521,7 +623,7 @@ class SessionPipeline:
         strategy = ctx.strategy_decision.strategy if ctx.strategy_decision else None
         if strategy is None:
             return ctx
-        sides = _ENTRY_LEG_SIDES.get(strategy)
+        sides = ENTRY_LEG_SIDES.get(strategy)
         if sides is None or len(sides) != len(selected_legs):
             return ctx
 
@@ -554,6 +656,7 @@ class SessionPipeline:
             selected_legs=selected_legs,
             per_leg_quotes=per_leg_quotes,
             lots=gatekeeper.allowed_lots,
+            lot_size=self._index_contract.lot_size,
         )
         return ctx.update(open_position=open_position)
 
@@ -618,35 +721,53 @@ class SessionPipeline:
             }
         )
 
-    def _maybe_log_paper_exit(self, ctx: AgentContext, exit_decision: ExitDecision) -> None:
+    def _maybe_log_paper_exit(
+        self,
+        ctx: AgentContext,
+        exit_decision: ExitDecision,
+        *,
+        per_leg_quotes: dict[str, Quote] | None = None,
+    ) -> None:
         if not self._dry_run or self._paper_logger is None:
             return
-        self._paper_logger.log_paper_row(
-            {
-                "event": "PAPER_EXIT",
-                "session_id": ctx.session_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "open_position": (
-                    {
-                        "symbol": ctx.open_position.symbol,
-                        "strategy": ctx.open_position.strategy,
-                    }
-                    if ctx.open_position
-                    else None
-                ),
-                "exit_action": exit_decision.action.value,
-                "exit_reason": exit_decision.reason,
-                "rule_id": exit_decision.rule_id,
-                "leg_action_intents": [
-                    {
-                        "symbol": intent.symbol,
-                        "action": intent.action,
-                        "leg_id": intent.leg_id,
-                    }
-                    for intent in exit_decision.leg_action_intents
-                ],
-            }
-        )
+        row: dict[str, Any] = {
+            "event": "PAPER_EXIT",
+            "session_id": ctx.session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "open_position": (
+                {
+                    "symbol": ctx.open_position.symbol,
+                    "strategy": ctx.open_position.strategy,
+                }
+                if ctx.open_position
+                else None
+            ),
+            "exit_action": exit_decision.action.value,
+            "exit_reason": exit_decision.reason,
+            "rule_id": exit_decision.rule_id,
+            "leg_action_intents": [
+                {
+                    "symbol": intent.symbol,
+                    "action": intent.action,
+                    "leg_id": intent.leg_id,
+                }
+                for intent in exit_decision.leg_action_intents
+            ],
+        }
+        if ctx.open_position is not None and per_leg_quotes is not None:
+            from src.execution.noop_port import compute_paper_mtm
+
+            mtm = compute_paper_mtm(
+                ctx.open_position,
+                per_leg_quotes=per_leg_quotes,
+                lot_size=self._index_contract.lot_size,
+            )
+            row.update(mtm)
+        elif ctx.open_position is not None:
+            from src.execution.noop_port import expected_friction_for_position
+
+            row["friction_inr"] = expected_friction_for_position(ctx.open_position)
+        self._paper_logger.log_paper_row(row)
 
     async def _refresh_features(
         self,
@@ -718,7 +839,7 @@ class SessionPipeline:
         credit_spread_position: CreditSpreadPosition | None,
         nifty_bars: Sequence[OhlcvBar] | None,
         session_open_vix: float | None,
-    ) -> ExitDecision:
+    ) -> ExitEvaluationResult:
         position = ctx.open_position
         if position is None:
             raise SessionPipelineError("Exit evaluation requested without open_position.")
@@ -735,13 +856,16 @@ class SessionPipeline:
                 f"Unsupported strategy for exit evaluation: {position.strategy}"
             )
 
+        per_leg_quotes: dict[str, Quote] | None = None
         if position.legs is not None and len(position.legs) >= 2:
             try:
-                per_leg_quotes: dict[str, Quote] = {}
+                per_leg_quotes = {}
                 for leg in position.legs:
                     per_leg_quotes[leg.symbol] = await self._provider.get_bid_ask(leg.symbol)
             except (MarketDataError, FyersAuthError):
-                return self._exit_engine.build_emergency_flatten_decision(position)
+                return ExitEvaluationResult(
+                    decision=self._exit_engine.build_emergency_flatten_decision(position),
+                )
 
             open_vix = session_open_vix or self._session_open_vix
             if open_vix is None:
@@ -753,11 +877,15 @@ class SessionPipeline:
                 open_vix = vix
                 self._session_open_vix = open_vix
 
-            return self._exit_engine.evaluate_position(
-                position,
-                feature_payload=feature_payload,
-                nifty_bars=nifty_bars,
-                session_open_vix=open_vix,
+            return ExitEvaluationResult(
+                decision=self._exit_engine.evaluate_position(
+                    position,
+                    feature_payload=feature_payload,
+                    nifty_bars=nifty_bars,
+                    session_open_vix=open_vix,
+                    per_leg_quotes=per_leg_quotes,
+                    lot_size=self._index_contract.lot_size,
+                ),
                 per_leg_quotes=per_leg_quotes,
             )
 
@@ -774,11 +902,13 @@ class SessionPipeline:
                 )
             open_vix = vix
             self._session_open_vix = open_vix
-        return self._exit_engine.evaluate(
-            strategy=strategy_key,
-            position=credit_spread_position,
-            feature_payload=feature_payload,
-            session_open_vix=open_vix,
+        return ExitEvaluationResult(
+            decision=self._exit_engine.evaluate(
+                strategy=strategy_key,
+                position=credit_spread_position,
+                feature_payload=feature_payload,
+                session_open_vix=open_vix,
+            ),
         )
 
 
@@ -788,9 +918,20 @@ def _build_open_position_from_entry(
     selected_legs: list[OptionGreeks],
     per_leg_quotes: dict[str, Quote],
     lots: int,
+    lot_size: int,
 ) -> OpenPosition:
     """Construct in-memory position from submitted legs (v4.1 pre-broker-sync)."""
     strategy_id = strategy.value
+    leg_symbols = [leg.symbol for leg in selected_legs]
+    entry_cash_flow_inr = compute_entry_credit_inr(
+        strategy,
+        leg_symbols=leg_symbols,
+        per_leg_quotes=per_leg_quotes,
+        lot_size=lot_size,
+        lots=lots,
+    )
+    qty = lot_size * lots
+    entry_per_unit = entry_cash_flow_inr / qty if qty > 0 else 0.0
     leg_positions: list[OpenPosition] = []
     for leg in selected_legs:
         quote = per_leg_quotes[leg.symbol]
@@ -804,14 +945,16 @@ def _build_open_position_from_entry(
                 strategy_id=strategy_id,
             )
         )
-    entry_avg = sum(position.entry_price for position in leg_positions) / len(leg_positions)
     if len(leg_positions) >= 2:
         return OpenPosition(
             symbol=f"{strategy_id}_summary",
             strategy=strategy,
             lots=lots,
-            entry_price=entry_avg,
+            entry_price=max(abs(entry_per_unit), 0.01),
+            entry_cash_flow_inr=entry_cash_flow_inr,
             strategy_id=strategy_id,
             legs=leg_positions,
         )
-    return leg_positions[0]
+    return leg_positions[0].model_copy(
+        update={"entry_cash_flow_inr": entry_cash_flow_inr},
+    )

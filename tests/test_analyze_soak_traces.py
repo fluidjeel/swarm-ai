@@ -87,11 +87,55 @@ class AnalyzeSoakTracesTests(unittest.TestCase):
                     "session_id": "exec-01",
                     "timestamp": "2026-06-09T11:30:50+05:30",
                     "exit_reason": "take_profit",
+                    "gross_pnl_inr": 150.0,
+                    "friction_inr": 160.0,
+                    "net_pnl_inr": -10.0,
                 },
             ]
         )
         self.assertIn("Total trades     : 1", output)
-        self.assertIn("Net paper PnL    : INR 110.00", output)
+        self.assertIn("Net paper PnL    : INR -10.00", output)
+
+    def test_hold_state_approves_do_not_count_as_new_trades(self) -> None:
+        output = self._run_analyzer(
+            [
+                {
+                    "event": "PAPER_APPROVE",
+                    "session_id": "hold-01",
+                    "timestamp": "2026-06-09T11:00:50+05:30",
+                    "strategy_decision": "iron_condor",
+                },
+                {
+                    "event": "PAPER_ORDER_ACK",
+                    "session_id": "hold-01",
+                    "timestamp": "2026-06-09T11:00:51+05:30",
+                    "symbol": "NSE:NIFTY26JUN25000CE",
+                },
+                {
+                    "event": "PAPER_APPROVE",
+                    "session_id": "hold-01",
+                    "timestamp": "2026-06-09T11:05:50+05:30",
+                    "strategy_decision": "iron_condor",
+                },
+                {
+                    "event": "PAPER_ORDER_ACK",
+                    "session_id": "hold-01",
+                    "timestamp": "2026-06-09T11:05:51+05:30",
+                    "symbol": "NSE:NIFTY26JUN25000CE",
+                },
+                {
+                    "event": "PAPER_EXIT",
+                    "session_id": "hold-01",
+                    "timestamp": "2026-06-09T11:30:50+05:30",
+                    "exit_reason": "take_profit",
+                    "gross_pnl_inr": 150.0,
+                    "friction_inr": 160.0,
+                    "net_pnl_inr": -10.0,
+                },
+            ]
+        )
+        self.assertIn("Total trades     : 1", output)
+        self.assertIn("Net paper PnL    : INR -10.00", output)
 
 
 if __name__ == "__main__":

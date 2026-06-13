@@ -54,27 +54,33 @@ def _iron_condor_legs() -> list[OpenPosition]:
     ]
 
 
-def _iron_condor_summary() -> OpenPosition:
+def _iron_condor_summary(*, entry_cash_flow_inr: float | None = None) -> OpenPosition:
     legs = _iron_condor_legs()
+    entry_per_unit = 70.0
     return OpenPosition(
         symbol="iron_condor_summary",
         strategy="iron_condor",
         lots=1,
-        entry_price=87.5,
+        entry_price=entry_per_unit,
+        entry_cash_flow_inr=entry_cash_flow_inr if entry_cash_flow_inr is not None else entry_per_unit,
         strategy_id="iron_condor",
         legs=legs,
     )
 
 
-def _leg_quotes(*, ask_by_symbol: dict[str, float] | None = None, default_ask: float = 80.0) -> dict[str, Quote]:
+def _leg_quotes(
+    *,
+    ask_by_symbol: dict[str, float] | None = None,
+    default_ask: float | None = None,
+) -> dict[str, Quote]:
     quotes: dict[str, Quote] = {}
     for leg in _iron_condor_legs():
-        ask = (ask_by_symbol or {}).get(leg.symbol, default_ask)
+        ask = (ask_by_symbol or {}).get(leg.symbol, default_ask or leg.entry_price)
         quotes[leg.symbol] = Quote(
             symbol=leg.symbol,
-            bid=ask - 1.0,
+            bid=ask,
             ask=ask,
-            ltp=ask - 0.5,
+            ltp=ask,
             spread_pct=0.02,
         )
     return quotes
@@ -202,6 +208,25 @@ class ExitEngineCreditSpreadTests(unittest.TestCase):
         self.assertEqual(decision.action, ExitAction.EXIT_MARKET)
         self.assertEqual(decision.rule_id, "vix_intraday_spike")
 
+    def test_exits_on_credit_stop_loss(self) -> None:
+        position = CreditSpreadPosition(entry_credit=100.0, current_close_cost=160.0)
+        decision = self.engine.evaluate_credit_spread(
+            position,
+            feature_payload={"vix": 14.0},
+            session_open_vix=14.0,
+        )
+        self.assertEqual(decision.action, ExitAction.EXIT_MARKET)
+        self.assertEqual(decision.rule_id, "credit_stop_loss")
+
+    def test_holds_below_credit_stop_threshold(self) -> None:
+        position = CreditSpreadPosition(entry_credit=100.0, current_close_cost=149.0)
+        decision = self.engine.evaluate_credit_spread(
+            position,
+            feature_payload={"vix": 14.0},
+            session_open_vix=14.0,
+        )
+        self.assertEqual(decision.action, ExitAction.HOLD)
+
 
 class ExitEngineMultiLegTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -212,7 +237,7 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             _iron_condor_summary(),
             feature_payload={"vix": 14.0},
             session_open_vix=14.0,
-            per_leg_quotes=_leg_quotes(default_ask=80.0),
+            per_leg_quotes=_leg_quotes(),
         )
 
         self.assertEqual(decision.action, ExitAction.HOLD)
@@ -221,7 +246,7 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             all(intent.action == "HOLD" for intent in decision.leg_action_intents)
         )
 
-    def test_evaluate_position_exits_all_legs_when_one_leg_stopped(self) -> None:
+    def test_evaluate_position_exits_all_legs_on_theta_capture(self) -> None:
         short_leg = "NSE:NIFTY24JUN24100PE"
         decision = self.engine.evaluate_position(
             _iron_condor_summary(),
@@ -229,7 +254,6 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             session_open_vix=14.0,
             per_leg_quotes=_leg_quotes(
                 ask_by_symbol={short_leg: 40.0},
-                default_ask=80.0,
             ),
         )
 
@@ -240,13 +264,28 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             all(intent.action == "EXIT_MARKET" for intent in decision.leg_action_intents)
         )
 
+    def test_evaluate_position_exits_all_legs_on_credit_stop(self) -> None:
+        short_pe = "NSE:NIFTY24JUN24100PE"
+        short_ce = "NSE:NIFTY24JUN25000CE"
+        decision = self.engine.evaluate_position(
+            _iron_condor_summary(),
+            feature_payload={"vix": 14.0},
+            session_open_vix=14.0,
+            per_leg_quotes=_leg_quotes(
+                ask_by_symbol={
+                    short_pe: 200.0,
+                    short_ce: 200.0,
+                },
+            ),
+        )
+
+        self.assertEqual(decision.action, ExitAction.EXIT_MARKET)
+        self.assertEqual(decision.rule_id, "credit_stop_loss")
+
     def test_evaluate_position_uses_per_leg_quotes(self) -> None:
         short_leg = "NSE:NIFTY24JUN24100PE"
-        healthy_quotes = _leg_quotes(default_ask=80.0)
-        stopped_quotes = _leg_quotes(
-            ask_by_symbol={short_leg: 40.0},
-            default_ask=80.0,
-        )
+        healthy_quotes = _leg_quotes()
+        stopped_quotes = _leg_quotes(ask_by_symbol={short_leg: 40.0})
 
         healthy = self.engine.evaluate_position(
             _iron_condor_summary(),
@@ -322,7 +361,7 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             _iron_condor_summary(),
             feature_payload={"vix": 16.0},
             session_open_vix=14.0,
-            per_leg_quotes=_leg_quotes(default_ask=80.0),
+            per_leg_quotes=_leg_quotes(),
         )
 
         self.assertEqual(decision.action, ExitAction.EXIT_MARKET)
@@ -331,22 +370,19 @@ class ExitEngineMultiLegTests(unittest.TestCase):
             all(intent.action == "EXIT_MARKET" for intent in decision.leg_action_intents)
         )
 
-    def test_evaluate_position_blended_theta_capture_is_worst_leg(self) -> None:
+    def test_evaluate_position_spread_theta_capture(self) -> None:
         short_leg = "NSE:NIFTY24JUN24100PE"
         decision = self.engine.evaluate_position(
             _iron_condor_summary(),
             feature_payload={"vix": 14.0},
             session_open_vix=14.0,
-            per_leg_quotes=_leg_quotes(
-                ask_by_symbol={short_leg: 55.0},
-                default_ask=80.0,
-            ),
+            per_leg_quotes=_leg_quotes(ask_by_symbol={short_leg: 45.0}),
         )
 
-        expected_worst = compute_theta_capture_pct(
-            CreditSpreadPosition(entry_credit=120.0, current_close_cost=55.0)
-        )
-        self.assertAlmostEqual(decision.theta_capture_pct, expected_worst)
+        entry_credit = 70.0
+        close_cost = 45.0 + 90.0 - 80.0 - 60.0
+        expected_theta = (entry_credit - close_cost) / entry_credit
+        self.assertAlmostEqual(decision.theta_capture_pct, expected_theta)
 
 
 class ExitEngineHelperTests(unittest.TestCase):

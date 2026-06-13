@@ -28,12 +28,17 @@ from src.data.base_provider import OhlcvBar, Quote
 from src.features.math_utils import compute_atr
 
 from src.core.context import OpenPosition, StrategyName
+from src.risk.friction import (
+    compute_entry_credit_inr,
+    compute_exit_close_cost_inr,
+)
 
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 REGIME_FLIP_AD_THRESHOLD = 1.0
 THETA_CAPTURE_TARGET = 0.60
 VIX_INTRADAY_SPIKE_THRESHOLD = 0.10
+DEFAULT_CREDIT_STOP_MULTIPLIER = 1.5
 
 LegIntentAction = Literal["EXIT_MARKET", "HOLD"]
 
@@ -93,12 +98,14 @@ class ExitEngine:
         regime_flip_ad_threshold: float = REGIME_FLIP_AD_THRESHOLD,
         theta_capture_target: float = THETA_CAPTURE_TARGET,
         vix_spike_threshold: float = VIX_INTRADAY_SPIKE_THRESHOLD,
+        credit_stop_multiplier: float = DEFAULT_CREDIT_STOP_MULTIPLIER,
     ) -> None:
         self.atr_period = atr_period
         self.atr_stop_multiplier = atr_stop_multiplier
         self.regime_flip_ad_threshold = regime_flip_ad_threshold
         self.theta_capture_target = theta_capture_target
         self.vix_spike_threshold = vix_spike_threshold
+        self.credit_stop_multiplier = credit_stop_multiplier
 
     def evaluate_futures(
         self,
@@ -178,6 +185,20 @@ class ExitEngine:
                     theta_capture_pct=theta_capture,
                 )
 
+        if position.entry_credit > 0:
+            stop_level = position.entry_credit * self.credit_stop_multiplier
+            if position.current_close_cost >= stop_level:
+                return ExitDecision(
+                    action=ExitAction.EXIT_MARKET,
+                    reason=(
+                        f"Premium stop breached: close cost {position.current_close_cost:.2f} "
+                        f">= {self.credit_stop_multiplier:.1f}x entry credit "
+                        f"{position.entry_credit:.2f} (stop={stop_level:.2f})"
+                    ),
+                    rule_id="credit_stop_loss",
+                    theta_capture_pct=theta_capture,
+                )
+
         if theta_capture >= self.theta_capture_target:
             return ExitDecision(
                 action=ExitAction.EXIT_MARKET,
@@ -226,16 +247,23 @@ class ExitEngine:
         nifty_bars: Sequence[OhlcvBar] | None = None,
         session_open_vix: float | None = None,
         per_leg_quotes: dict[str, Quote] | None = None,
+        lot_size: int = 1,
     ) -> ExitDecision:
         """Evaluate exit for any open position, including multi-leg clusters.
 
-        For multi-leg positions (open_position.legs has 2+ entries):
-          - Each leg is evaluated independently using per_leg_quotes
-          - Exit fires if ANY leg hits its stop rule (most conservative)
-          - The returned ExitDecision includes leg_action_intents for every leg
-        For single-leg positions: delegates to existing evaluate() logic.
+        Multi-leg positions are evaluated at spread level (net entry credit vs
+        net close cost), not per-leg.
         """
         legs = open_position.legs
+        if legs is not None and len(legs) >= 2:
+            return self._evaluate_multi_leg_spread(
+                open_position,
+                feature_payload=feature_payload,
+                session_open_vix=session_open_vix,
+                per_leg_quotes=per_leg_quotes,
+                lot_size=lot_size,
+            )
+
         if legs is None or len(legs) < 2:
             return self._evaluate_single_leg_position(
                 open_position,
@@ -245,8 +273,24 @@ class ExitEngine:
                 per_leg_quotes=per_leg_quotes,
             )
 
+    def _evaluate_multi_leg_spread(
+        self,
+        open_position: OpenPosition,
+        *,
+        feature_payload: dict[str, Any],
+        session_open_vix: float | None,
+        per_leg_quotes: dict[str, Quote] | None,
+        lot_size: int,
+    ) -> ExitDecision:
+        legs = open_position.legs
+        if legs is None or len(legs) < 2:
+            raise ExitEngineError("multi-leg spread evaluation requires 2+ legs")
         if per_leg_quotes is None:
             raise ExitEngineError("per_leg_quotes required for multi-leg exit evaluation")
+        if session_open_vix is None:
+            raise ExitEngineError(
+                "session_open_vix required for multi-leg credit spread exit evaluation."
+            )
 
         strategy_key = _strategy_key(open_position.strategy)
         if not _is_defined_risk_exit_strategy(strategy_key):
@@ -254,24 +298,50 @@ class ExitEngine:
                 f"Unsupported strategy for multi-leg exit evaluation: {open_position.strategy}"
             )
 
-        leg_results: list[tuple[OpenPositionModel, ExitDecision]] = []
-        for leg in legs:
-            quote = per_leg_quotes.get(leg.symbol)
-            if quote is None:
-                raise ExitEngineError(
-                    f"Missing per_leg_quotes entry for leg symbol: {leg.symbol}"
-                )
-            leg_decision = self._evaluate_leg(
-                leg,
-                strategy_key=strategy_key,
-                feature_payload=feature_payload,
-                quote=quote,
-                nifty_bars=nifty_bars,
-                session_open_vix=session_open_vix,
-            )
-            leg_results.append((leg, leg_decision))
+        leg_symbols = [leg.symbol for leg in legs]
+        for symbol in leg_symbols:
+            if symbol not in per_leg_quotes:
+                raise ExitEngineError(f"Missing per_leg_quotes entry for leg symbol: {symbol}")
 
-        return _aggregate_multi_leg_decision(leg_results)
+        entry_credit = _resolve_entry_credit_per_unit(
+            open_position,
+            lot_size=lot_size,
+        )
+        close_cost = _resolve_exit_close_cost_per_unit(
+            open_position.strategy,
+            leg_symbols=leg_symbols,
+            per_leg_quotes=per_leg_quotes,
+            lot_size=lot_size,
+            lots=open_position.lots,
+        )
+        spread_decision = self.evaluate_credit_spread(
+            CreditSpreadPosition(
+                entry_credit=entry_credit,
+                current_close_cost=close_cost,
+            ),
+            feature_payload=feature_payload,
+            session_open_vix=session_open_vix,
+        )
+        intents = [
+            LegActionIntent(
+                symbol=leg.symbol,
+                action=(
+                    "EXIT_MARKET"
+                    if spread_decision.action == ExitAction.EXIT_MARKET
+                    else "HOLD"
+                ),
+                leg_id=leg.leg_id or leg.symbol,
+            )
+            for leg in legs
+        ]
+        return ExitDecision(
+            action=spread_decision.action,
+            reason=spread_decision.reason,
+            rule_id=spread_decision.rule_id,
+            trailing_stop=spread_decision.trailing_stop,
+            theta_capture_pct=spread_decision.theta_capture_pct,
+            leg_action_intents=intents,
+        )
 
     def build_emergency_flatten_decision(self, open_position: OpenPosition) -> ExitDecision:
         """Fail-closed flatten when broker quotes are unavailable."""
@@ -289,30 +359,6 @@ class ExitEngine:
             reason="broker_error_emergency_flatten",
             rule_id="broker_error_emergency_flatten",
             leg_action_intents=intents,
-        )
-
-    def _evaluate_leg(
-        self,
-        leg: OpenPosition,
-        *,
-        strategy_key: str,
-        feature_payload: dict[str, Any],
-        quote: Quote,
-        nifty_bars: Sequence[OhlcvBar] | None,
-        session_open_vix: float | None,
-    ) -> ExitDecision:
-        if session_open_vix is None:
-            raise ExitEngineError(
-                "session_open_vix required for multi-leg credit spread exit evaluation."
-            )
-        leg_position = CreditSpreadPosition(
-            entry_credit=leg.entry_price,
-            current_close_cost=_leg_close_cost(quote),
-        )
-        return self.evaluate_credit_spread(
-            leg_position,
-            feature_payload=feature_payload,
-            session_open_vix=session_open_vix,
         )
 
     def _evaluate_single_leg_position(
@@ -370,53 +416,51 @@ def compute_theta_capture_pct(position: CreditSpreadPosition) -> float:
     return profit / position.entry_credit
 
 
-def _aggregate_multi_leg_decision(
-    leg_results: Sequence[tuple[OpenPosition, ExitDecision]],
-) -> ExitDecision:
-    any_exit = any(decision.action == ExitAction.EXIT_MARKET for _, decision in leg_results)
-    theta_values = [
-        decision.theta_capture_pct
-        for _, decision in leg_results
-        if decision.theta_capture_pct is not None
-    ]
-    blended_theta = max(theta_values) if theta_values else None
-
-    if any_exit:
-        trigger = next(
-            decision for _, decision in leg_results if decision.action == ExitAction.EXIT_MARKET
-        )
-        intents = [
-            LegActionIntent(
+def _resolve_entry_credit_per_unit(open_position: OpenPosition, *, lot_size: int) -> float:
+    qty = lot_size * open_position.lots
+    if open_position.entry_cash_flow_inr is not None and qty > 0:
+        return open_position.entry_cash_flow_inr / qty
+    if open_position.legs:
+        leg_symbols = [leg.symbol for leg in open_position.legs]
+        entry_quotes = {
+            leg.symbol: Quote(
                 symbol=leg.symbol,
-                action="EXIT_MARKET",
-                leg_id=leg.leg_id or leg.symbol,
+                bid=leg.entry_price,
+                ask=leg.entry_price,
+                ltp=leg.entry_price,
+                spread_pct=0.0,
             )
-            for leg, _ in leg_results
-        ]
-        return ExitDecision(
-            action=ExitAction.EXIT_MARKET,
-            reason=trigger.reason,
-            rule_id=trigger.rule_id,
-            trailing_stop=trigger.trailing_stop,
-            theta_capture_pct=blended_theta,
-            leg_action_intents=intents,
+            for leg in open_position.legs
+        }
+        return compute_entry_credit_inr(
+            open_position.strategy,
+            leg_symbols=leg_symbols,
+            per_leg_quotes=entry_quotes,
+            lot_size=1,
+            lots=1,
         )
+    return open_position.entry_price
 
-    intents = [
-        LegActionIntent(
-            symbol=leg.symbol,
-            action="HOLD",
-            leg_id=leg.leg_id or leg.symbol,
-        )
-        for leg, _ in leg_results
-    ]
-    hold_reason = leg_results[0][1].reason if leg_results else "All legs within exit thresholds."
-    return ExitDecision(
-        action=ExitAction.HOLD,
-        reason=hold_reason,
-        theta_capture_pct=blended_theta,
-        leg_action_intents=intents,
+
+def _resolve_exit_close_cost_per_unit(
+    strategy: StrategyName | str,
+    *,
+    leg_symbols: list[str],
+    per_leg_quotes: dict[str, Quote],
+    lot_size: int,
+    lots: int,
+) -> float:
+    qty = lot_size * lots
+    if qty <= 0:
+        raise ExitEngineError("lot_size and lots must be positive for exit evaluation")
+    total_inr = compute_exit_close_cost_inr(
+        strategy,
+        leg_symbols=leg_symbols,
+        per_leg_quotes=per_leg_quotes,
+        lot_size=lot_size,
+        lots=lots,
     )
+    return total_inr / qty
 
 
 def _strategy_key(strategy: StrategyName | str) -> str:

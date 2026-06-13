@@ -96,21 +96,21 @@ class RegimeClassifierBoundaryTests(unittest.TestCase):
         )
 
     def test_trend_up_requires_ad_and_pcr(self) -> None:
-        ctx = _ctx(ad=1.5, pcr=0.03, divergence=0.5)
+        ctx = _ctx(ad=1.5, pcr=0.15, divergence=0.5)
         self.assertEqual(
             classify_regime(ctx, config=CONFIG).regime_decision,
             RegimeLabel.TREND_UP,
         )
 
     def test_trend_up_blocked_by_low_pcr(self) -> None:
-        ctx = _ctx(ad=2.0, pcr=0.01, divergence=0.5)
+        ctx = _ctx(ad=2.0, pcr=0.05, divergence=0.5)
         self.assertNotEqual(
             classify_regime(ctx, config=CONFIG).regime_decision,
             RegimeLabel.TREND_UP,
         )
 
     def test_trend_down_at_thresholds(self) -> None:
-        ctx = _ctx(ad=0.7, pcr=-0.03, divergence=0.5)
+        ctx = _ctx(ad=0.7, pcr=-0.15, divergence=0.5)
         self.assertEqual(
             classify_regime(ctx, config=CONFIG).regime_decision,
             RegimeLabel.TREND_DOWN,

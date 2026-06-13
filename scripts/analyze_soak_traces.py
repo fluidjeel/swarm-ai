@@ -30,14 +30,28 @@ except ImportError:  # pragma: no cover - optional for --file-only runs
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "logs"
-FRICTION_RUPEES = 40.0
 DEFAULT_TICK_INTERVAL_SEC = 300
 DEFAULT_TABLE = "A2A_Traces"
 DEFAULT_REGION = "ap-south-1"
 
+try:
+    from src.risk.friction import FRICTION_PER_LEG_ROUND_TRIP_INR, round_trip_friction
+except ImportError:  # pragma: no cover - standalone fallback
+    FRICTION_PER_LEG_ROUND_TRIP_INR = 40.0
+
+    def round_trip_friction(strategy: str, *, leg_count: int | None = None) -> float:
+        legs = leg_count
+        if legs is None:
+            legs = {
+                "iron_condor": 4,
+                "bull_call_spread": 2,
+                "bear_put_spread": 2,
+            }.get(strategy.strip().lower(), 1)
+        return FRICTION_PER_LEG_ROUND_TRIP_INR * max(legs, 1)
+
 TICK_EVENTS = frozenset({"paper_tick", "tick_trace"})
 TRADE_ENTRY_EVENTS = frozenset({"PAPER_APPROVE"})
-TRADE_EXIT_EVENTS = frozenset({"PAPER_EXIT"})
+TRADE_EXIT_EVENTS = frozenset({"PAPER_EXIT", "duration_limit_emergency_flatten"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +397,9 @@ def _is_executable_trade(
 
 
 def _estimate_gross_pnl(exit_payload: dict[str, Any]) -> float:
+    logged = exit_payload.get("gross_pnl_inr")
+    if logged is not None:
+        return float(logged)
     if _is_emergency_flatten(exit_payload):
         return 0.0
     reason = str(exit_payload.get("exit_reason") or exit_payload.get("rule_id") or "").lower()
@@ -407,38 +424,72 @@ def _strategy_from_event(event: TraceEvent) -> str:
 
 
 def _link_trades(events: list[TraceEvent]) -> list[TradeLifecycle]:
-    entries = [event for event in events if event.event in TRADE_ENTRY_EVENTS]
-    exits = [event for event in events if event.event in TRADE_EXIT_EVENTS]
+    """
+    Pair only closed entry→exit cycles.
+
+    Approves while a position is already open (hold / step-adjust) are ignored.
+    """
     trades: list[TradeLifecycle] = []
-    exit_index = 0
+    position_open = False
+    open_entry: TraceEvent | None = None
 
-    for entry in entries:
-        strategy = _strategy_from_event(entry)
-        while exit_index < len(exits) and exits[exit_index].timestamp < entry.timestamp:
-            exit_index += 1
-        exit_event = exits[exit_index] if exit_index < len(exits) else None
-        if exit_event is not None:
-            exit_index += 1
-
-        executed = _is_executable_trade(entry, exit_event, events)
-        if not executed:
+    for event in events:
+        if event.event == "PAPER_APPROVE":
+            if position_open:
+                continue
+            if not _has_execution_attempt(events, event.timestamp):
+                continue
+            if _strategy_from_event(event) == "cash_no_trade":
+                continue
+            open_entry = event
+            position_open = True
             continue
 
-        gross = _estimate_gross_pnl(exit_event.payload) if exit_event else 0.0
-        friction = FRICTION_RUPEES
-        net = gross - friction
-        trades.append(
-            TradeLifecycle(
-                entry=entry,
-                exit=exit_event,
-                strategy=strategy,
-                gross_pnl=gross,
-                net_pnl=net,
-                friction=friction,
-                is_win=gross > 0,
-                executed=True,
+        if event.event not in TRADE_EXIT_EVENTS:
+            continue
+
+        if not position_open or open_entry is None:
+            position_open = False
+            open_entry = None
+            continue
+
+        exit_event = event if event.event == "PAPER_EXIT" else None
+        if exit_event is not None and _is_aborted_same_tick_setup(open_entry, exit_event):
+            position_open = False
+            open_entry = None
+            continue
+
+        if event.event == "duration_limit_emergency_flatten" or _is_executable_trade(
+            open_entry, exit_event, events
+        ):
+            strategy = _strategy_from_event(open_entry)
+            friction = round_trip_friction(strategy)
+            gross = (
+                _estimate_gross_pnl(exit_event.payload) if exit_event is not None else 0.0
             )
-        )
+            logged_friction = (
+                exit_event.payload.get("friction_inr") if exit_event is not None else None
+            )
+            if logged_friction is not None:
+                friction = float(logged_friction)
+            logged_net = (
+                exit_event.payload.get("net_pnl_inr") if exit_event is not None else None
+            )
+            net = float(logged_net) if logged_net is not None else gross - friction
+            trades.append(
+                TradeLifecycle(
+                    entry=open_entry,
+                    exit=exit_event,
+                    strategy=_strategy_from_event(open_entry),
+                    gross_pnl=gross,
+                    net_pnl=net,
+                    friction=friction,
+                    is_win=gross > 0,
+                    executed=True,
+                )
+            )
+        position_open = False
+        open_entry = None
 
     return trades
 
@@ -449,6 +500,9 @@ def _find_zombie_positions(events: list[TraceEvent]) -> list[str]:
     last_tick_ts: datetime | None = None
 
     for event in events:
+        if event.event == "duration_limit_emergency_flatten":
+            last_open = None
+            continue
         if event.event not in TICK_EVENTS:
             continue
         last_tick_ts = event.timestamp
@@ -475,6 +529,8 @@ def _find_zombie_positions(events: list[TraceEvent]) -> list[str]:
             approve_strategy = _strategy_from_event(event)
             approve_ts = event.timestamp.isoformat()
         if event.event == "PAPER_EXIT" and open_after_approve:
+            open_after_approve = False
+        if event.event == "duration_limit_emergency_flatten":
             open_after_approve = False
         if event.event in TICK_EVENTS and open_after_approve:
             if event.payload.get("open_position") is None and event.payload.get("final_outcome") == "WOULD_TRADE":
@@ -561,13 +617,17 @@ def _performance_metrics(trades: list[TradeLifecycle]) -> dict[str, Any]:
 
     profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else float("inf")
 
+    total_friction = sum(trade.friction for trade in trades)
+    avg_friction = (total_friction / total) if total else 0.0
+
     return {
         "total_trades": total,
         "win_rate_pct": (100.0 * len(wins) / total) if total else 0.0,
         "profit_factor": profit_factor,
         "max_drawdown": max_drawdown,
         "net_paper_pnl": net_total,
-        "friction_per_trade": FRICTION_RUPEES,
+        "total_friction": total_friction,
+        "avg_friction_per_trade": avg_friction,
     }
 
 
@@ -658,7 +718,8 @@ def render_report(analysis: SoakAnalysis, *, tick_interval_sec: int) -> str:
     lines.append(f"Max drawdown     : INR {perf['max_drawdown']:.2f}")
     lines.append(
         f"Net paper PnL    : INR {perf['net_paper_pnl']:.2f}  "
-        f"(includes INR {FRICTION_RUPEES:.0f} friction/trade)"
+        f"(per-leg friction: INR {perf['total_friction']:.2f} total, "
+        f"INR {perf['avg_friction_per_trade']:.0f} avg/trade)"
     )
     lines.append("")
 

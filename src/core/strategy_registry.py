@@ -6,9 +6,8 @@ from src.core.context import StrategyName
 
 LEG_COUNTS: dict[StrategyName, int] = {
     StrategyName.IRON_CONDOR: 4,
-    # Other defined-risk spreads are 2 legs (bull_call_spread, bear_put_spread).
-    # Vertical spread leg count is not used by the current ExitEngine multi-leg path
-    # because they are entered as 2 separate OCO orders in Phase 4.
+    StrategyName.BULL_CALL_SPREAD: 2,
+    StrategyName.BEAR_PUT_SPREAD: 2,
 }
 DEFAULT_LEG_COUNT = 1
 

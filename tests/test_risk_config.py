@@ -113,8 +113,15 @@ class RiskConfigTests(unittest.TestCase):
         self.assertEqual(clamp_to_absolute("delta_tolerance", 0.50), 0.30)
         self.assertEqual(clamp_to_absolute("max_dte_for_entry", 30), 21)
 
-    def test_strategy_registry_contains_only_iron_condor_multi_leg(self) -> None:
-        self.assertEqual(LEG_COUNTS, {StrategyName.IRON_CONDOR: 4})
+    def test_strategy_registry_leg_counts(self) -> None:
+        self.assertEqual(
+            LEG_COUNTS,
+            {
+                StrategyName.IRON_CONDOR: 4,
+                StrategyName.BULL_CALL_SPREAD: 2,
+                StrategyName.BEAR_PUT_SPREAD: 2,
+            },
+        )
         self.assertEqual(DEFAULT_LEG_COUNT, 1)
 
 

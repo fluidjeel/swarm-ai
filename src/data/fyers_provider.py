@@ -38,6 +38,7 @@ DEFAULT_NIFTY_INDEX = "NSE:NIFTY50-INDEX"
 DEFAULT_REQUEST_TIMEOUT_SEC = 15.0
 FYERS_QUOTES_BATCH_SIZE = 50
 OPT_CHAIN_STRIKE_BOUND = 15
+NIFTY_OPT_CHAIN_STRIKE_BOUND = 8
 
 _DEFAULT_STRIKE_STEP_BY_SYMBOL: dict[str, float] = {
     "NSE:NIFTY50-INDEX": 50.0,
@@ -210,17 +211,38 @@ def _infer_strike_step(chain: list[dict[str, Any]], symbol: str) -> float:
     return min(diffs) if diffs else 50.0
 
 
+def _opt_chain_strike_bound(symbol: str) -> int:
+    """Per-index strike window for option-chain fetch and post-filter."""
+    if symbol.upper() == DEFAULT_NIFTY_INDEX:
+        return NIFTY_OPT_CHAIN_STRIKE_BOUND
+    return OPT_CHAIN_STRIKE_BOUND
+
+
+def _build_option_chain_payload(
+    symbol: str,
+    *,
+    timestamp: str = "",
+) -> dict[str, str | int]:
+    """Minimal Fyers optionchain request — tight strikecount reduces broker payload."""
+    return {
+        "symbol": symbol,
+        "strikecount": _opt_chain_strike_bound(symbol),
+        "timestamp": timestamp,
+    }
+
+
 def _filter_chain_rows_near_spot(
     chain: list[dict[str, Any]],
     *,
     spot: float,
     symbol: str,
-    strike_bound: int = OPT_CHAIN_STRIKE_BOUND,
+    strike_bound: int | None = None,
 ) -> list[dict[str, Any]]:
     """Keep only strikes within ±strike_bound steps of the underlying spot."""
+    bound = strike_bound if strike_bound is not None else _opt_chain_strike_bound(symbol)
     step = _infer_strike_step(chain, symbol)
-    min_strike = spot - strike_bound * step
-    max_strike = spot + strike_bound * step
+    min_strike = spot - bound * step
+    max_strike = spot + bound * step
 
     filtered: list[dict[str, Any]] = []
     for row in chain:
@@ -234,7 +256,7 @@ def _filter_chain_rows_near_spot(
 
     if not filtered:
         raise MarketDataError(
-            f"No option chain rows within ±{strike_bound} strikes of spot {spot:.2f} "
+            f"No option chain rows within ±{bound} strikes of spot {spot:.2f} "
             f"for {symbol} (step={step})."
         )
     return filtered
@@ -294,7 +316,12 @@ def _parse_option_chain_pcr(
         raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
 
     if spot is not None:
-        chain = _filter_chain_rows_near_spot(chain, spot=spot, symbol=symbol)
+        chain = _filter_chain_rows_near_spot(
+            chain,
+            spot=spot,
+            symbol=symbol,
+            strike_bound=_opt_chain_strike_bound(symbol),
+        )
 
     call_oi, put_oi, expiry_timestamp = _sum_option_oi(chain)
     if expiry_timestamp is None:
@@ -633,7 +660,12 @@ def _parse_option_chain_quotes(
         raise MarketDataError("Fyers option chain response missing 'optionsChain'.")
 
     if spot is not None:
-        chain = _filter_chain_rows_near_spot(chain, spot=spot, symbol=symbol)
+        chain = _filter_chain_rows_near_spot(
+            chain,
+            spot=spot,
+            symbol=symbol,
+            strike_bound=_opt_chain_strike_bound(symbol),
+        )
 
     quotes: list[OptionQuote] = []
     for row in chain:
@@ -859,14 +891,15 @@ class FyersMarketDataProvider(MarketDataProvider):
         self,
         symbol: str = "NSE:NIFTY50-INDEX",
         *,
-        strikecount: int = OPT_CHAIN_STRIKE_BOUND,
+        strikecount: int | None = None,
     ) -> OptionChainPcr:
         spot = await self.get_index_ltp(symbol)
-        payload = {
-            "symbol": symbol,
-            "strikecount": min(strikecount, OPT_CHAIN_STRIKE_BOUND),
-            "timestamp": "",
-        }
+        payload = _build_option_chain_payload(symbol, timestamp="")
+        if strikecount is not None:
+            payload["strikecount"] = min(
+                strikecount,
+                _opt_chain_strike_bound(symbol),
+            )
 
         def _fetch() -> OptionChainPcr:
             client = self._get_client()
@@ -928,11 +961,7 @@ class FyersMarketDataProvider(MarketDataProvider):
         expiry_ts: int,
     ) -> list[OptionGreeks]:
         spot = await self.get_index_ltp(symbol)
-        payload = {
-            "symbol": symbol,
-            "strikecount": OPT_CHAIN_STRIKE_BOUND,
-            "timestamp": str(expiry_ts),
-        }
+        payload = _build_option_chain_payload(symbol, timestamp=str(expiry_ts))
 
         def _fetch_chain() -> dict[str, Any]:
             client = self._get_client()

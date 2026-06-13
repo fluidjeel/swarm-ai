@@ -10,12 +10,18 @@ from typing import Any
 from src.config.absolute_limits import clamp_to_absolute
 from src.config.risk_config import RiskConfig
 from src.core.context import SESSION_CIRCUIT_BREAKER_PNL, AgentContext, CriticStatus, StrategyName
+from src.core.strategy_registry import expected_leg_count
+from src.risk.friction import (
+    friction_ev_threshold_inr,
+    passes_friction_ev_gate,
+    round_trip_friction,
+)
 
 VIX_CEILING = 18.0
 EXPIRY_DTE_BLOCK = 1
 BASE_CAPITAL_INR = 600_000.0
 LOT_SCALING_STEP_INR = 400_000.0
-OPTIONS_ROUND_TRIP_SLIPPAGE_INR = 40.0
+PREMIUM_SELLING_STRATEGIES = frozenset({StrategyName.IRON_CONDOR.value})
 
 
 class GatekeeperVerdict(StrEnum):
@@ -36,6 +42,8 @@ class GatekeeperRule(StrEnum):
     MARGIN_BLOCK = "margin_block"
     CASH_NO_TRADE = "cash_no_trade"
     MISSING_DATA = "missing_data"
+    FRICTION_EV_BLOCK = "friction_ev_block"
+    LOW_VOLATILITY_ENVIRONMENT = "low_volatility_environment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +66,9 @@ def compute_allowed_lots(
     return 1 + int(math.floor(excess / step))
 
 
-def round_trip_slippage(strategy: str) -> float:
-    """HLDD §2.2: ₹40 options round-trip (v4.1 defined-risk spreads only)."""
-    _ = strategy
-    return OPTIONS_ROUND_TRIP_SLIPPAGE_INR
+def round_trip_slippage(strategy: str, *, leg_count: int | None = None) -> float:
+    """Per-leg round-trip friction for the strategy (₹40 × leg count)."""
+    return round_trip_friction(strategy, leg_count=leg_count)
 
 
 def _strategy_key(strategy: StrategyName | str) -> str:
@@ -103,7 +110,10 @@ class RiskGatekeeper:
             base_capital=self.base_capital,
             step=self.lot_scaling_step,
         )
-        expected_cost = round_trip_slippage(strategy_key)
+        expected_cost = round_trip_slippage(
+            strategy_key,
+            leg_count=expected_leg_count(strategy_key),
+        )
         vix = _optional_float(feature_payload, "vix", "VIX")
         dte = _optional_int(feature_payload, "dte", "DTE")
 
@@ -181,6 +191,8 @@ def evaluate_from_context(
     gatekeeper: RiskGatekeeper | None = None,
     current_capital: float = BASE_CAPITAL_INR,
     requested_lots: int = 1,
+    estimated_max_profit_inr: float | None = None,
+    leg_count: int | None = None,
 ) -> AgentContext:
     """Apply post-critic gatekeeper rules from AgentContext."""
     gk = gatekeeper or RiskGatekeeper(
@@ -198,7 +210,26 @@ def evaluate_from_context(
         )
 
     strategy_key = strategy_decision.strategy.value
-    expected_cost = round_trip_slippage(strategy_key)
+    resolved_legs = leg_count if leg_count is not None else expected_leg_count(strategy_decision.strategy)
+    expected_cost = round_trip_slippage(strategy_key, leg_count=resolved_legs)
+
+    if estimated_max_profit_inr is not None and not passes_friction_ev_gate(
+        estimated_max_profit_inr,
+        expected_cost,
+    ):
+        threshold = friction_ev_threshold_inr(expected_cost)
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=(
+                    f"Friction EV block: max profit INR {estimated_max_profit_inr:.2f} "
+                    f"< 2× friction INR {threshold:.2f} "
+                    f"({resolved_legs} legs × INR 40)"
+                ),
+                rule_id=GatekeeperRule.FRICTION_EV_BLOCK,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
 
     critic = ctx.critic_decision
     if critic is None or critic.status != CriticStatus.APPROVE:
@@ -241,6 +272,37 @@ def evaluate_from_context(
         )
 
     feature_payload = _feature_payload_from_ctx(ctx)
+    if strategy_key in PREMIUM_SELLING_STRATEGIES and _is_low_volatility_environment(
+        feature_payload,
+        config=config,
+    ):
+        ivp = _optional_float(
+            feature_payload,
+            "iv_percentile",
+            "IV_Percentile",
+            "iv_percentile_rank",
+        )
+        vix = _optional_float(feature_payload, "vix", "VIX")
+        if ivp is not None:
+            detail = (
+                f"IV percentile {ivp:.1f} < floor {config.iv_percentile_min:.1f}"
+            )
+        elif vix is not None:
+            detail = (
+                f"VIX {vix:.2f} <= low-vol proxy floor {config.vix_low_vol_floor:.2f} "
+                "(IV percentile unavailable)"
+            )
+        else:
+            detail = "Missing IV percentile and VIX for premium-selling gate"
+        return ctx.update(
+            gatekeeper_decision=GatekeeperDecision(
+                verdict=GatekeeperVerdict.REJECT,
+                reason=f"Low volatility environment: {detail}",
+                rule_id=GatekeeperRule.LOW_VOLATILITY_ENVIRONMENT,
+                expected_round_trip_cost=expected_cost,
+            )
+        )
+
     legacy = gk.evaluate(
         strategy=strategy_key,
         feature_payload=feature_payload,
@@ -263,6 +325,25 @@ def _feature_payload_from_ctx(ctx: AgentContext) -> dict[str, Any]:
     if regime.expiry_weighted_pcr_momentum is not None:
         payload["Expiry_Weighted_PCR_Momentum"] = regime.expiry_weighted_pcr_momentum
     return payload
+
+
+def _is_low_volatility_environment(
+    feature_payload: dict[str, Any],
+    *,
+    config: RiskConfig,
+) -> bool:
+    ivp = _optional_float(
+        feature_payload,
+        "iv_percentile",
+        "IV_Percentile",
+        "iv_percentile_rank",
+    )
+    if ivp is not None:
+        return ivp < config.iv_percentile_min
+    vix = _optional_float(feature_payload, "vix", "VIX")
+    if vix is not None:
+        return vix <= config.vix_low_vol_floor
+    return False
 
 
 def _missing_data_decision(

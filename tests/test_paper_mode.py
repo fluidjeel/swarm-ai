@@ -106,11 +106,12 @@ class _PaperFakeProvider:
         ]
 
     async def get_bid_ask(self, symbol: str) -> Quote:
+        ltp = 120.0 if "24700PE" in symbol or "25300CE" in symbol else 80.0
         return Quote(
             symbol=symbol,
-            bid=101.0,
-            ask=103.0,
-            ltp=102.0,
+            bid=ltp - 1.0,
+            ask=ltp + 1.0,
+            ltp=ltp,
             spread_pct=0.02,
         )
 
@@ -183,6 +184,8 @@ class PaperModeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+        from src.orchestration.session_pipeline import ExitEvaluationResult
+
         exit_decision = ExitDecision(
             action=ExitAction.EXIT_MARKET,
             reason="theta capture",
@@ -190,7 +193,7 @@ class PaperModeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.object(pipeline, "_evaluate_exit", new_callable=AsyncMock) as mock_exit:
-            mock_exit.return_value = exit_decision
+            mock_exit.return_value = ExitEvaluationResult(decision=exit_decision)
             await pipeline.run_tick(
                 ctx,
                 credit_spread_position=CreditSpreadPosition(
@@ -308,7 +311,7 @@ class PaperModeHelperTests(unittest.TestCase):
             gatekeeper_decision=GatekeeperDecision(
                 verdict=GatekeeperVerdict.APPROVE,
                 reason="approved",
-                expected_round_trip_cost=40.0,
+                expected_round_trip_cost=160.0,
             ),
         )
         row = build_paper_tick_row(

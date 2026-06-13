@@ -34,6 +34,9 @@ class AbsoluteLimits(BaseModel):
     dividend_yield: tuple[float, float, str] = (0.0, 0.10, "implausible index yield > 10%")
     iv_solver_max_iter: tuple[int, int, str] = (1, 200, "Newton-Raphson budget")
     iv_tolerance: tuple[float, float, str] = (1e-9, 1e-2, "BSM solver precision")
+    iv_percentile_min: tuple[float, float, str] = (5.0, 80.0, "IV percentile floor for premium selling")
+    vix_low_vol_floor: tuple[float, float, str] = (8.0, 20.0, "VIX proxy floor when IVP unavailable")
+    credit_stop_multiplier: tuple[float, float, str] = (1.5, 2.0, "Credit spread stop multiplier")
 
 
 ABSOLUTE_LIMITS = AbsoluteLimits()

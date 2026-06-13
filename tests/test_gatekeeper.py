@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from src.config.risk_config import RiskConfig
 from src.core.context import AgentContext, CriticDecision, CriticStatus, OpeningRegime, StrategyDecision
@@ -33,7 +34,7 @@ class RiskGatekeeperTests(unittest.TestCase):
         )
         self.assertEqual(decision.verdict, GatekeeperVerdict.APPROVE)
         self.assertEqual(decision.allowed_lots, 1)
-        self.assertEqual(decision.expected_round_trip_cost, 40.0)
+        self.assertEqual(decision.expected_round_trip_cost, 160.0)
 
     def test_rejects_expiry_day_iron_condor(self) -> None:
         payload = dict(self.base_payload, dte=1)
@@ -169,14 +170,15 @@ class RiskGatekeeperTests(unittest.TestCase):
         self.assertEqual(decision.allowed_lots, 2)
 
     def test_options_slippage_cost_for_all_strategies(self) -> None:
-        self.assertEqual(round_trip_slippage("bull_call_spread"), 40.0)
-        self.assertEqual(round_trip_slippage("iron_condor"), 40.0)
+        self.assertEqual(round_trip_slippage("bull_call_spread"), 80.0)
+        self.assertEqual(round_trip_slippage("iron_condor"), 160.0)
+        self.assertEqual(round_trip_slippage("bear_put_spread"), 80.0)
         decision = self.gatekeeper.evaluate(
             strategy="bull_call_spread",
             feature_payload=self.base_payload,
             daily_realized_pnl=0.0,
         )
-        self.assertEqual(decision.expected_round_trip_cost, 40.0)
+        self.assertEqual(decision.expected_round_trip_cost, 80.0)
 
 
 class EvaluateFromContextTests(unittest.TestCase):
@@ -249,6 +251,57 @@ class EvaluateFromContextTests(unittest.TestCase):
         )
         result = evaluate_from_context(ctx, config=self.config)
         self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
+
+    def test_friction_ev_block_when_max_profit_below_threshold(self) -> None:
+        result = evaluate_from_context(
+            self.base_ctx,
+            config=self.config,
+            estimated_max_profit_inr=300.0,
+        )
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.REJECT)
+        self.assertEqual(result.gatekeeper_decision.rule_id, GatekeeperRule.FRICTION_EV_BLOCK)
+
+    def test_friction_ev_passes_at_threshold(self) -> None:
+        result = evaluate_from_context(
+            self.base_ctx,
+            config=self.config,
+            estimated_max_profit_inr=320.0,
+        )
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.APPROVE)
+
+    def test_rejects_iron_condor_in_low_vix_environment(self) -> None:
+        ctx = self.base_ctx.update(opening_regime=OpeningRegime(vix=12.5, nifty_ad_ratio=1.1))
+        result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.REJECT)
+        self.assertEqual(
+            result.gatekeeper_decision.rule_id,
+            GatekeeperRule.LOW_VOLATILITY_ENVIRONMENT,
+        )
+
+    def test_iv_percentile_gate_rejects_when_below_min(self) -> None:
+        ctx = AgentContext(
+            session_id="gatekeeper-ivp-session",
+            opening_regime=OpeningRegime(vix=16.0, nifty_ad_ratio=1.1),
+            dte=7,
+            strategy_decision=StrategyDecision(
+                strategy="iron_condor",
+                supporting_signals=["ad_ratio=1.10", "vix=16.00"],
+            ),
+            critic_decision=CriticDecision(
+                status=CriticStatus.APPROVE,
+                reason="math_checks_passed",
+            ),
+        )
+        with mock.patch(
+            "src.risk.gatekeeper._feature_payload_from_ctx",
+            return_value={"vix": 16.0, "dte": 7, "iv_percentile": 18.0},
+        ):
+            result = evaluate_from_context(ctx, config=self.config)
+        self.assertEqual(result.gatekeeper_decision.verdict, GatekeeperVerdict.REJECT)
+        self.assertEqual(
+            result.gatekeeper_decision.rule_id,
+            GatekeeperRule.LOW_VOLATILITY_ENVIRONMENT,
+        )
 
 
 class RiskGatekeeperMissingDataTests(unittest.TestCase):

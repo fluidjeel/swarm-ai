@@ -145,19 +145,32 @@ def _iron_condor_response() -> dict:
 
 class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_rebuild_sets_open_position_from_broker(self) -> None:
-        position = OpenPosition(
-            symbol="NSE:NIFTY24JUN24900CE",
-            strategy="bull_call_spread",
-            lots=1,
-            entry_price=100.0,
-        )
-        provider = _FakeProvider(positions=[position])
+        legs = [
+            OpenPosition(
+                symbol="NSE:NIFTY24JUN24900CE",
+                strategy="bull_call_spread",
+                lots=1,
+                entry_price=100.0,
+                leg_id="NSE:NIFTY24JUN24900CE",
+                strategy_id="bull_call_spread",
+            ),
+            OpenPosition(
+                symbol="NSE:NIFTY24JUN25200CE",
+                strategy="bull_call_spread",
+                lots=1,
+                entry_price=80.0,
+                leg_id="NSE:NIFTY24JUN25200CE",
+                strategy_id="bull_call_spread",
+            ),
+        ]
+        provider = _FakeProvider(positions=legs)
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-01")
 
         result = await rebuild_from_fyers(provider, ctx, boot_logger=boot)
 
-        self.assertEqual(result.open_position, position)
+        self.assertEqual(result.open_position.strategy, "bull_call_spread")
+        self.assertEqual(len(result.open_position.legs), 2)
         self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
 
     async def test_rebuild_with_empty_positions_clears_ctx(self) -> None:
@@ -204,35 +217,29 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(boot.rows[-1]["outcome"], "orphan_leg_detected")
 
     async def test_rebuild_handles_multi_position_gracefully(self) -> None:
-        first = OpenPosition(
-            symbol="NSE:NIFTY24JUN24900CE",
-            strategy="bull_call_spread",
-            lots=1,
-            entry_price=100.0,
-            leg_id="NSE:NIFTY24JUN24900CE",
-            strategy_id="bull_call_spread",
-        )
-        second = OpenPosition(
+        full_condor = _parse_positions(_iron_condor_response())
+        orphan = OpenPosition(
             symbol="NSE:NIFTY24JUN25200CE",
-            strategy="bull_call_spread",
+            strategy="iron_condor",
             lots=1,
             entry_price=200.0,
             leg_id="NSE:NIFTY24JUN25200CE",
-            strategy_id="bull_call_spread_alt",
+            strategy_id="iron_condor_alt",
         )
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-05")
 
         result = await rebuild_from_fyers(
-            _FakeProvider(positions=[first, second]),
+            _FakeProvider(positions=[*full_condor, orphan]),
             ctx,
             boot_logger=boot,
         )
 
-        self.assertEqual(result.open_position, first)
+        self.assertEqual(result.open_position.strategy, "iron_condor")
+        self.assertEqual(len(result.open_position.legs), 4)
         dropped_rows = [row for row in boot.rows if row.get("outcome") == "multi_group_kept_largest"]
         self.assertEqual(len(dropped_rows), 1)
-        self.assertIn("NSE:NIFTY24JUN25200CE", dropped_rows[0]["detail"])
+        self.assertIn("iron_condor_alt", dropped_rows[0]["detail"])
         self.assertEqual(boot.rows[-1]["outcome"], "position_recovered")
 
     async def test_rebuild_aggregates_4_legs_iron_condor(self) -> None:
@@ -280,7 +287,7 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 lots=1,
                 entry_price=90.0,
                 leg_id="NSE:NIFTY24JUN24900CE",
-                strategy_id="bull_call_spread",
+                strategy_id="bull_call_spread_a",
             ),
             OpenPosition(
                 symbol="NSE:NIFTY24JUN25200CE",
@@ -288,17 +295,18 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 lots=1,
                 entry_price=80.0,
                 leg_id="NSE:NIFTY24JUN25200CE",
-                strategy_id="bull_call_spread",
+                strategy_id="bull_call_spread_b",
             ),
         ]
         boot = _RecordingBootLogger()
         ctx = AgentContext(session_id="recovery-session-09")
 
-        result = await rebuild_from_fyers(_FakeProvider(positions=legs), ctx, boot_logger=boot)
+        with self.assertRaises(OrphanLegError):
+            await rebuild_from_fyers(_FakeProvider(positions=legs), ctx, boot_logger=boot)
 
-        self.assertIn(result.open_position.symbol, {"NSE:NIFTY24JUN24900CE", "NSE:NIFTY24JUN25200CE"})
         dropped_rows = [row for row in boot.rows if row.get("outcome") == "multi_group_kept_largest"]
         self.assertEqual(len(dropped_rows), 1)
+        self.assertEqual(boot.rows[-1]["outcome"], "orphan_leg_detected")
 
     async def test_rebuild_keeps_largest_group(self) -> None:
         single_leg = OpenPosition(
@@ -323,7 +331,7 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.open_position.legs), 4)
         dropped_rows = [row for row in boot.rows if row.get("outcome") == "multi_group_kept_largest"]
         self.assertEqual(len(dropped_rows), 1)
-        self.assertIn("NSE:NIFTY24JUN24900CE", dropped_rows[0]["detail"])
+        self.assertIn("bull_call_spread", dropped_rows[0]["detail"])
 
     async def test_rebuild_end_to_end_untagged_iron_condor(self) -> None:
         parsed = _parse_positions(_iron_condor_response())
