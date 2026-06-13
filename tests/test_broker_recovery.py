@@ -345,6 +345,197 @@ class BrokerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.open_position.legs), 4)
 
 
+_UNSUPPORTED = object()
+
+
+class _StateProvider:
+    """Provider stub exposing the 4-way reconciliation surface."""
+
+    def __init__(
+        self,
+        *,
+        positions: list[OpenPosition] | None = None,
+        positions_error: Exception | None = None,
+        orders: object = _UNSUPPORTED,
+        trades: object = _UNSUPPORTED,
+        funds: object = _UNSUPPORTED,
+    ) -> None:
+        self._positions = positions or []
+        self._positions_error = positions_error
+        self._orders = orders
+        self._trades = trades
+        self._funds = funds
+
+    async def get_positions(self) -> list[OpenPosition]:
+        if self._positions_error is not None:
+            raise self._positions_error
+        return list(self._positions)
+
+    async def get_orders(self):
+        if self._orders is _UNSUPPORTED:
+            raise NotImplementedError
+        return list(self._orders)
+
+    async def get_trades(self):
+        if self._trades is _UNSUPPORTED:
+            raise NotImplementedError
+        return list(self._trades)
+
+    async def get_funds(self):
+        if self._funds is _UNSUPPORTED:
+            raise NotImplementedError
+        return self._funds
+
+
+def _spread_legs() -> list[OpenPosition]:
+    return [
+        OpenPosition(
+            symbol="NSE:NIFTY24JUN24000CE",
+            strategy="bull_call_spread",
+            lots=1,
+            entry_price=100.0,
+            leg_id="L1",
+            strategy_id="bcs1",
+        ),
+        OpenPosition(
+            symbol="NSE:NIFTY24JUN24200CE",
+            strategy="bull_call_spread",
+            lots=1,
+            entry_price=60.0,
+            leg_id="L2",
+            strategy_id="bcs1",
+        ),
+    ]
+
+
+class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    def _ctx(self) -> AgentContext:
+        return AgentContext(session_id="reconcile-session-01")
+
+    async def test_clean_flat_state_is_ok(self) -> None:
+        from src.data.base_provider import FundSnapshot
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(
+            positions=[],
+            orders=[],
+            trades=[],
+            funds=FundSnapshot(available_balance=600000.0, utilized_margin=0.0, total_balance=600000.0),
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(report.ok)
+        self.assertFalse(ctx.reconciliation_halt)
+        self.assertTrue(report.orders_checked and report.trades_checked and report.funds_checked)
+
+    async def test_unsupported_dimensions_are_skipped(self) -> None:
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(positions=[])
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(report.ok)
+        self.assertFalse(ctx.reconciliation_halt)
+        self.assertFalse(report.orders_checked)
+        self.assertFalse(report.funds_checked)
+
+    async def test_margin_without_position_halts(self) -> None:
+        from src.data.base_provider import FundSnapshot
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(
+            positions=[],
+            funds=FundSnapshot(available_balance=500000.0, utilized_margin=45000.0, total_balance=545000.0),
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertFalse(report.ok)
+        self.assertTrue(ctx.reconciliation_halt)
+        self.assertTrue(any(m.startswith("margin_without_position") for m in report.mismatches))
+
+    async def test_negative_balance_halts(self) -> None:
+        from src.data.base_provider import FundSnapshot
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(
+            positions=[],
+            funds=FundSnapshot(available_balance=-100.0, utilized_margin=0.0, total_balance=-100.0),
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(ctx.reconciliation_halt)
+        self.assertTrue(any(m.startswith("negative_balance") for m in report.mismatches))
+
+    async def test_dangling_working_order_when_flat_halts(self) -> None:
+        from src.data.base_provider import BrokerOrder
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(
+            positions=[],
+            orders=[
+                BrokerOrder(
+                    order_id="O1",
+                    symbol="NSE:NIFTY24JUN24000CE",
+                    side="BUY",
+                    qty=50,
+                    status="PENDING",
+                )
+            ],
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(ctx.reconciliation_halt)
+        self.assertEqual(report.working_order_count, 1)
+        self.assertTrue(any(m.startswith("dangling_working_order") for m in report.mismatches))
+
+    async def test_working_order_matching_open_leg_is_ok(self) -> None:
+        from src.data.base_provider import BrokerOrder
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        legs = _spread_legs()
+        provider = _StateProvider(
+            positions=legs,
+            orders=[
+                BrokerOrder(
+                    order_id="O1",
+                    symbol="NSE:NIFTY24JUN24000CE",
+                    side="SELL",
+                    qty=50,
+                    status="OPEN",
+                )
+            ],
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(report.ok)
+        self.assertFalse(ctx.reconciliation_halt)
+        self.assertIsNotNone(ctx.open_position)
+
+    async def test_filled_orders_do_not_count_as_working(self) -> None:
+        from src.data.base_provider import BrokerOrder
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(
+            positions=[],
+            orders=[
+                BrokerOrder(order_id="O1", symbol="X", side="BUY", qty=50, status="FILLED")
+            ],
+        )
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(report.ok)
+        self.assertEqual(report.working_order_count, 0)
+
+    async def test_positions_query_failure_halts(self) -> None:
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(positions_error=MarketDataError("503 broker down"))
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(ctx.reconciliation_halt)
+        self.assertTrue(any(m.startswith("positions_query_failed") for m in report.mismatches))
+
+    async def test_partial_leg_set_halts(self) -> None:
+        from src.orchestration.broker_recovery import reconcile_broker_state
+
+        provider = _StateProvider(positions=[_spread_legs()[0]])  # only 1 of 2 legs
+        ctx, report = await reconcile_broker_state(provider, self._ctx())
+        self.assertTrue(ctx.reconciliation_halt)
+        self.assertTrue(any(m.startswith("position_leg_mismatch") for m in report.mismatches))
+
+
 class SessionClockTests(unittest.TestCase):
     def test_session_clock_blocks_pre_open(self) -> None:
         now = _ist(2026, 6, 9, 8, 30)  # Tuesday

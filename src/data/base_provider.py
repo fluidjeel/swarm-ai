@@ -82,6 +82,50 @@ class OptionGreeks:
     confidence: str
 
 
+# Working (not-yet-terminal) broker order statuses. Presence of any of these at
+# reconciliation time means an order is in flight that our state must account for.
+WORKING_ORDER_STATUSES = frozenset(
+    {"PENDING", "OPEN", "TRIGGER_PENDING", "PARTIALLY_FILLED", "TRANSIT"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOrder:
+    """Normalized broker order row for state reconciliation."""
+
+    order_id: str
+    symbol: str
+    side: str
+    qty: int
+    status: str
+    tag: str | None = None
+
+    @property
+    def is_working(self) -> bool:
+        return self.status.upper() in WORKING_ORDER_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerTrade:
+    """Normalized executed-trade row for state reconciliation/audit."""
+
+    trade_id: str
+    order_id: str
+    symbol: str
+    side: str
+    qty: int
+    price: float
+
+
+@dataclass(frozen=True, slots=True)
+class FundSnapshot:
+    """Normalized funds/margin snapshot for state reconciliation."""
+
+    available_balance: float
+    utilized_margin: float
+    total_balance: float
+
+
 class MarketDataError(RuntimeError):
     """Raised when a market data provider returns an invalid or failed response."""
 
@@ -155,3 +199,22 @@ class MarketDataProvider(ABC):
     @abstractmethod
     async def get_bid_ask(self, symbol: str) -> Quote:
         """Return bid, ask, ltp, spread_pct. Raise on missing fields."""
+
+    # -- Broker-state reconciliation surface ----------------------------
+    # Optional dimensions beyond positions. Providers that cannot supply a
+    # dimension should leave the default, which signals "unsupported" to the
+    # reconciler (that dimension is skipped, not treated as a mismatch). On a
+    # genuine broker/transport failure, providers must raise MarketDataError so
+    # the reconciler fails closed.
+
+    async def get_orders(self) -> list[BrokerOrder]:
+        """Return today's broker orderbook. Default: unsupported."""
+        raise NotImplementedError("Provider does not expose get_orders().")
+
+    async def get_trades(self) -> list[BrokerTrade]:
+        """Return today's executed trades (tradebook). Default: unsupported."""
+        raise NotImplementedError("Provider does not expose get_trades().")
+
+    async def get_funds(self) -> FundSnapshot:
+        """Return funds/margin snapshot. Default: unsupported."""
+        raise NotImplementedError("Provider does not expose get_funds().")

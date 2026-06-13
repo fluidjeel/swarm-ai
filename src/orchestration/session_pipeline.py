@@ -59,6 +59,7 @@ from src.features.feature_engine import (
 from src.orchestration.broker_recovery import (
     BootLogger,
     rebuild_from_fyers,
+    reconcile_broker_state,
     sync_position_from_broker,
 )
 from src.orchestration.context_adapters import (
@@ -159,6 +160,7 @@ class SessionPipeline:
         paper_logger: PaperEventLogger | None = None,
         execution_port: ExecutionPort | None = None,
         broker_sync: bool = False,
+        reconcile_on_boot: bool = False,
         memory_guard_enabled: bool = False,
         tick_trace_writer: TickTraceWriter | None = None,
         enable_ddb_tick_trace: bool = True,
@@ -183,6 +185,7 @@ class SessionPipeline:
         self._dry_run = dry_run
         self._paper_logger = paper_logger
         self._broker_sync = broker_sync
+        self._reconcile_on_boot = reconcile_on_boot
         self._memory_guard_enabled = memory_guard_enabled
         self._tick_trace_writer = tick_trace_writer
         if self._tick_trace_writer is None and enable_ddb_tick_trace:
@@ -368,6 +371,24 @@ class SessionPipeline:
                     }
                 )
 
+        if self._reconcile_on_boot:
+            ctx, recon = await reconcile_broker_state(
+                self._provider,
+                ctx,
+                boot_logger=self._boot_logger,
+            )
+            if not recon.ok and writer is not None:
+                writer.log_boot_row(
+                    {
+                        "event": "session_bootstrap",
+                        "session_id": ctx.session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "phase_allowed": True,
+                        "outcome": "reconciliation_halt",
+                        "detail": "; ".join(recon.mismatches),
+                    }
+                )
+
         if writer is not None:
             writer.log_boot_row(
                 {
@@ -382,6 +403,7 @@ class SessionPipeline:
                     "has_open_position": ctx.has_open_position,
                     "baseline_initialized": ctx.baseline_initialized,
                     "feature_snapshot_price": ctx.feature_snapshot_price,
+                    "reconciliation_halt": ctx.reconciliation_halt,
                 }
             )
 
@@ -428,6 +450,14 @@ class SessionPipeline:
             # nonlocal so the `finally` trace + timeout path see the latest state
             # even if the body is cancelled mid-flight by the tick deadline.
             nonlocal ctx, exit_decision, live_underlying_ltp
+            if ctx.reconciliation_halt:
+                # Hard, human-gated stop: broker reality disagrees with our
+                # belief. Take no automated action (no entries, no exits) until
+                # an operator clears the flag.
+                return SessionTickResult(
+                    ctx=ctx,
+                    elapsed_ms=(time.perf_counter() - tick_start) * 1000,
+                )
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx, shared_market=shared_market)
             if self._broker_sync:

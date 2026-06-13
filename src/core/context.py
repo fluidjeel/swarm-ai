@@ -202,6 +202,14 @@ class AgentContext(StrictModel):
     )
     data_degraded: bool = False
     execution_halted: bool = False
+    reconciliation_halt: bool = Field(
+        default=False,
+        description=(
+            "Set True when broker-state reconciliation (positions/orders/trades/"
+            "funds) disagrees with in-memory state. Forces a hard, human-gated "
+            "halt: no new entries and no automated exits until cleared."
+        ),
+    )
     daily_pnl: float = 0.0
     circuit_status: bool = False
     dte: int = Field(default=0, ge=0, le=45)
@@ -225,7 +233,7 @@ class AgentContext(StrictModel):
 
     @property
     def is_halted(self) -> bool:
-        return self.circuit_status or self.execution_halted
+        return self.circuit_status or self.execution_halted or self.reconciliation_halt
 
     @property
     def has_open_position(self) -> bool:
