@@ -12,14 +12,17 @@ holes and are sequenced by dependency. See "Resilience review notes" at the bott
 
 | Status | Item | Notes |
 |--------|------|-------|
-| ⬜ | **Stop-ownership reality check** | Test if Fyers accepts BO/CO on NIFTY options for this account. If rejected → stops are permanently synthetic (EC2-only). 1hr test. |
-| ⬜ | **TraceID threading** | `uuid4` on `AgentContext` stamped through feature → critic → gatekeeper → order → fill → exit. Cheap; unblocks all debugging. Do first. |
-| ⬜ | **Dead-man's switch** | Heartbeat → CloudWatch alarm → Telegram. **P0 if stops are synthetic** (EC2 death = unprotected position). |
-| ⬜ | **4-way state reconciliation** | `broker_recovery.py` must reconcile positions + orders + trades + funds. On mismatch → `RECONCILIATION_HALT`. Needs new provider methods `get_orders`/`get_trades`/`get_funds`. |
-| ⬜ | **Call timeouts everywhere** | Every Fyers call needs a hard timeout so a hung-but-alive process cannot orphan the fcntl lock. (Note: OS auto-releases flock on process *death*; risk is hung-alive only.) |
-| ⬜ | **Lock TTL + watchdog** | Lock file writes creation ts; orchestrator kills PID + clears lock if > 6 min stale. Backstop to timeouts. |
-| ⬜ | **Adaptive stale-quote threshold** | Replace fixed 10-pt with `> 0.5 × 5m_ATR`. Static threshold paralyzes in high VIX, under-protects in low VIX. |
-| ⬜ | **Chaos Monkey test suite** | pytest fault injection on `FyersExecutionPort`: 504s, partial fills (2/4 legs), duplicate orderTags. Validates idempotency + reconciliation. Build AFTER reconciliation exists. |
+| ⬜ | **Stop-ownership reality check** | Test if Fyers accepts BO/CO on NIFTY options for this account. If rejected → stops are permanently synthetic (EC2-only). 1hr test. **DEFERRED — assuming synthetic; dead-man's switch built regardless.** |
+| ✅ | **TraceID threading** | `uuid4` on `AgentContext` stamped through tick trace + all paper rows (approve/order-ack/exit/sync). `src/core/context.py`, `session_pipeline.py`, `tick_trace.py`. |
+| ✅ | **Dead-man's switch** | `src/orchestration/deadman.py` (heartbeat-absence detector, out-of-process CLI) + `src/observability/alerting.py` (AlertSink/Telegram/logging). CloudWatch wiring still ops. |
+| ✅ | **4-way state reconciliation** | `reconcile_broker_state` in `broker_recovery.py`: positions+orders+trades+funds → `reconciliation_halt`. New optional provider methods `get_orders`/`get_trades`/`get_funds`. Hard-stops the tick. |
+| ✅ | **Call timeouts (tick deadline)** | `run_tick` wraps body in `asyncio.wait_for(tick_timeout_sec=120)`; cancels hung body and releases lock in `finally`. |
+| ✅ | **Lock TTL + watchdog** | `FileTickLock` writes pid/host/heartbeat sidecar; `_try_break_stale_lock` kills hung same-host holder past TTL (default 360s). |
+| ✅ | **Adaptive stale-quote threshold** | `effective_stale_quote_threshold = min(10pt ceiling, 0.5 × 5m_ATR)`. ATR can only *tighten* (Prime Directive #5 keeps 10pt as a hard ceiling). |
+| ✅ | **Chaos Monkey test suite** | `tests/test_chaos_execution.py`: 504-but-placed, retry-success, persistent-504, duplicate-tag, hard-reject, partial-fill flatten. |
+
+**Tier 0 status: code-complete on `pivot/v5.0-dev`. Remaining = ops wiring
+(CloudWatch alarm → dead-man CLI, Telegram creds) + the deferred BO/CO probe.**
 
 ---
 
