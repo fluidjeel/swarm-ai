@@ -31,10 +31,18 @@ holes and are sequenced by dependency. See "Resilience review notes" at the bott
 | Status | Item | Notes |
 |--------|------|-------|
 | ✅ | Per-leg friction (₹40/leg) | `src/risk/friction.py`, gatekeeper EV block, noop_port, analyzer |
-| ⏳ | True MTM paper PnL | Replace heuristic gross in `noop_port.py` + analyzer |
-| ⏳ | IV percentile gate | Block premium selling below 30th pct IV |
-| ⬜ | PCR threshold widen (±0.12) | `risk_config.json` + regime classifier |
-| ⬜ | Premium-based exit stops | Exit engine credit/debit denominated |
+| ✅ | True MTM paper PnL | `compute_paper_mtm` (real entry/exit premiums) → PAPER_EXIT rows; analyzer prefers logged `gross/net/friction`, heuristic only as legacy fallback |
+| ✅ | IV percentile gate | Gatekeeper `LOW_VOLATILITY_ENVIRONMENT` rule, scoped to premium selling (iron condor). **Runs on VIX proxy today** (`vix_low_vol_floor`); true IVP path is wired but dormant — see follow-up below |
+| ✅ | PCR threshold widen (±0.12) | `risk_config.json` + `risk_config.py` defaults + regime classifier; tested |
+| ✅ | Premium-based exit stops | `ExitEngine` credit-denominated: `credit_stop_loss` (1.5× entry credit), `theta_capture`, `vix_intraday_spike`; multi-leg uses net credit vs net close cost; tested single + multi-leg |
+
+**Tier A status: code-complete on `pivot/v5.0-dev`.**
+
+### Tier A follow-up (new)
+
+| Status | Item | Notes |
+|--------|------|-------|
+| ⬜ | **True IV-percentile feed** | The IV gate falls back to the VIX proxy because the Feature Engine does not yet compute an IV-percentile rank. Build an IV-history store (mirror `pcr_history`), surface `iv_percentile` on `OpeningRegime`, and thread it through `_feature_payload_from_ctx`. Then the gate uses real IVP (`iv_percentile_min=30`) instead of `vix_low_vol_floor`. |
 
 ---
 
