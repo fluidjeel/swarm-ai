@@ -1,4 +1,4 @@
-Quantitative Strategy & Risk Mandate: A2A Trading Engine v4.1
+﻿Quantitative Strategy & Risk Mandate: A2A Trading Engine v4.1
 
 1. Executive Summary & Core Hypothesis
 
@@ -10,9 +10,9 @@ The 2026 Regulatory Context: Operating within SEBI's updated algorithmic trading
 
 2. Capital Allocation & Margin Efficiency
 
-The system operates on a highly constrained initial capital pool of ₹6,00,000 to ₹7,00,000. To counter the geometric drag of idle capital, the system employs institutional-grade margin netting.
+The system operates on a highly constrained initial capital pool of Γé╣6,00,000 to Γé╣7,00,000. To counter the geometric drag of idle capital, the system employs institutional-grade margin netting.
 
-Base Reserve (The Anchor): ₹2,50,000 is established as the unbreachable hard reserve.
+Base Reserve (The Anchor): Γé╣2,50,000 is established as the unbreachable hard reserve.
 
 Yield Generation: This reserve is not held as idle cash. It is deployed into LIQUIDBEES (or equivalent liquid ETFs yielding approximately 5.0% - 7.0% annualized).
 
@@ -36,7 +36,7 @@ Risk constraints are hard-coded into the Python Risk Gatekeeper. LLMs have zero 
 
 4.1 Entry Constraints
 
-Session Circuit Breaker: If realized intraday PnL hits -₹8,000 (approx. 1.1% of total capital), the system enters a HALT state for the remainder of the session. No new entries are permitted.
+Session Circuit Breaker: If realized intraday PnL hits -Γé╣8,000 (approx. 1.1% of total capital), the system enters a HALT state for the remainder of the session. No new entries are permitted.
 
 Undefined Risk Block: The system structurally hard-rejects any naked short options.
 
@@ -66,6 +66,6 @@ HITL Gateway: Any parameter mutation requires a human Telegram "Approve" click b
 
 6. Primary Goals
 
-Goal 1 (Immediate): Generate a highly controlled, proprietary equity curve demonstrating a 35-45% CAGR with <15% maximum drawdown, utilizing the ₹6L capital pool as a proof-of-concept for the A2A architecture.
+Goal 1 (Immediate): Generate a highly controlled, proprietary equity curve demonstrating a 35-45% CAGR with <15% maximum drawdown, utilizing the Γé╣6L capital pool as a proof-of-concept for the A2A architecture.
 
 Goal 2 (Strategic): Package the tested orchestration middleware as a B2B SaaS infrastructure product for HNIs and mid-tier prop desks navigating SEBI's algorithmic frameworks.

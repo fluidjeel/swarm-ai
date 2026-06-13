@@ -1,38 +1,50 @@
 # A2A Swarm Trading Engine — System Directives
 
-# CONTEXT AWARENESS (MANDATORY)
-Before answering any architectural or coding query, you MUST consult the following files in the .context/ directory:
-1. 02_hldd.md: For high-level system requirements and agent roles.
-2. 03_execution_plan.md: For current project phase and task status.
-3. 06_pending_fixes.md: For any known technical debt or unresolved bugs.
+# CONTEXT AWARENESS (MANDATORY) — TWO SYSTEMS, TWO FOLDERS
+Read `.context/README.md` first.
 
-- Always check if a proposed code change contradicts the architecture defined in 02_hldd.md.
-- If a user asks "what's next," always reference 03_execution_plan.md.
-- When generating code, ensure it aligns with the persona defined in 04_finance_guru.md (Quant-focused) and 05_cloud_architect.md (AWS/Resilient-focused).
+## Which docs to use (prevents hallucination)
+
+| Task type | Read |
+|-----------|------|
+| Fix bug, paper soak, live trading, explain current behavior | `.context/v4.1/` ONLY |
+| Plan sprint, design v5 feature, estimate gates | `.context/v5.0/` + `v5.0/PIVOT_DECISION.md` |
+| Ambiguous | v4.1 for behavior; v5.0 only if user explicitly asks for pivot/roadmap |
+
+**NEVER** describe WebSocket, fractional sizing, 0-DTE straddle, or Expectancy Controller as deployed unless verified in `src/`.
+
+Partial v5 on v4.1 runtime (shipped): per-leg friction + EV gate in `src/risk/friction.py`.
+
+## v4.1 files (current system)
+- `v4.1/02_hldd.md` — architecture that matches code today
+- `v4.1/03_execution_plan.md` — Phases 1–4 completion
+- `v4.1/06_pending_fixes.md` — v4.1 carry-over items
+
+## v5.0 files (target system)
+- `v5.0/03_execution_plan.md` — Phase 5.0 sprint (Tier A → B → C)
+- `v5.0/PIVOT_DECISION.md` — gates, guardrail collisions, capital split
+
+Personas: `v4.1/04_finance_guru.md` (current) / `v5.0/04_finance_guru.md` (target). Cloud: `v4.1/05_cloud_architect.md` vs `v5.0/05_cloud_architect.md`.
 
 ## 1. Architectural Philosophy
-- **v4.1 Deterministic Core:** NO LLM API calls inside SessionPipeline.run_tick() or any 5-minute intraday loop. Agents 1, 2, 3 are pure Python (thresholds / matrix / math). LLMs live in Lambda periphery (Agent 0 pre-market scout, Agent 7 parameter tuner) only.
-- **No Vector DB in intraday path.** Historical learning happens in Agent 6 (Lambda) clustering DynamoDB traces offline.
-- **Retail Constraints:** - We operate on an AWS t3.small (2GB RAM). Avoid memory-intensive libraries.
-    - We utilize the free Fyers API v3. Always respect rate limits.
-    - No GPU-based local inference. We use API-based Frontier models (Claude/DeepSeek).
-- **Security & Observability:**
-    - Every agent decision MUST be serialized via the `AgentContext` and recorded via the `@trace_agent` decorator to DynamoDB.
-    - All LLM outputs must be passed through the `sanitizer` before hitting Pydantic models.
+- **Deterministic Core:** NO LLM in intraday hot path. Agents 1–3 pure Python. LLMs in Lambda periphery only.
+- **No Vector DB in intraday path.**
+- **Retail:** t3.small, 2GB RAM, Fyers API v3, respect rate limits.
+- **Observability:** AgentContext + `@trace_agent` → DynamoDB/JSONL.
 
 ## 2. Coding Standards
-- **Schema-First:** Every interaction between agents must be defined by a Pydantic model. If it's not a Pydantic model, it's not data—it's noise.
-- **Fail-Fast:** All API calls (Fyers, AWS) must have robust `try/except` blocks. If data is missing or a network call fails, the system must either set a "degraded" flag or halt execution—never silently pass bad data to the broker.
-- **Immutable Context:** Agents do not mutate the `AgentContext`. They receive a snapshot and return a modified copy.
+- Schema-First (Pydantic), Fail-Fast, Immutable Context.
 
 ## 3. Future-Proofing
-- Always reference `docs/FUTURE_ENHANCEMENTS.md` when proposing new features.
-- When in doubt, prefer the "Adapter Pattern" (Abstract Base Classes) so we can swap data providers (Fyers vs TrueData) without rewriting agent logic.
+- `docs/FUTURE_ENHANCEMENTS.md` → v5.0+ backlog; v4.1 backlog in `.context/v4.1/docs/`.
+- Adapter pattern for providers.
 
-## 4. v4.1 Prime Directive (non-negotiable)
-1. Broker GET /positions is the execution source of truth.
-2. Every tick is mutex-protected (cross-process fcntl or DynamoDB).
-3. Fail-closed on missing data — data_degraded=True aborts tick.
-4. AgentContext is the only state bus; agents read and append.
-5. STALE_QUOTE_POINTS = 10 NIFTY points is a hard ceiling.
-6. Agent 7 never deploys code — only tunes risk_config.json, clamped by absolute_limits.json, gated by Telegram HITL.
+## 4. Prime Directive (both versions)
+1. Broker GET /positions = source of truth.
+2. Mutex-protected ticks (fcntl / DynamoDB).
+3. Fail-closed on missing/degraded data.
+4. AgentContext = only state bus.
+5. STALE_QUOTE_POINTS = 10 NIFTY points.
+6. Agent 7 config-only, clamped by absolute_limits.json, Telegram HITL.
+7. Per-leg friction ₹40/leg; EV gate 2× friction (shipped).
+8. Tier C v5 epics gated — see `v5.0/PIVOT_DECISION.md`.

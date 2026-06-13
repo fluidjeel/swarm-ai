@@ -1,3 +1,7 @@
+﻿# HLDD: A2A v4.1 — Current System (Deterministic Core)
+
+> **Matches running code.** Target architecture: `../v5.0/02_hldd.md`
+
 High-Level Design Document (HLDD): A2A Trading Engine v4.1 (Deterministic Core)
 
 1. The 5 Cross-Cutting Infrastructure Systems
@@ -72,7 +76,7 @@ Execution: Async Python script processing broker REST API / websockets.
 
 Outputs: NIFTY_500_AD_Ratio, VIX_ATR_Divergence, Expiry_Weighted_PCR_Momentum.
 
-Data sources — Greeks: Greeks are computed locally via Black-Scholes in
+Data sources ΓÇö Greeks: Greeks are computed locally via Black-Scholes in
 src/features/greeks_engine.py. Inputs: Fyers index LTP (get_index_ltp), option LTP
 + bid/ask + OI from optionchain, DTE from chain expiry timestamp, risk-free rate
 and dividend yield from RiskConfig. IV solved by Newton-Raphson with bisection

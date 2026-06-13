@@ -1,4 +1,4 @@
-System Architecture & Cloud Infrastructure Specification: A2A v4.0
+﻿System Architecture & Cloud Infrastructure Specification: A2A v4.0
 
 1. Architectural Overview & Design Philosophy
 
@@ -77,7 +77,7 @@ The Invocation Router only triggers this swarm if open_positions == 0 and a mome
 
 Agent 1 (Regime Classifier): Ingests Feature Engine JSON. Outputs TREND_UP, TREND_DOWN, RANGE, CHOPPY, or UNCERTAIN.
 
-Agent 2 (Strategy Selector): Queries Vector Store for 3 similar past contexts. Selects strategy. MUST output ≥2 supporting_signals from the data payload via Pydantic schema.
+Agent 2 (Strategy Selector): Queries Vector Store for 3 similar past contexts. Selects strategy. MUST output ΓëÑ2 supporting_signals from the data payload via Pydantic schema.
 
 Agent 3 (The Critic - Adversarial): Replaces debate loops. One LLM call. Analyzes Agent 1 and Agent 2. Holds absolute veto power (APPROVE or REJECT).
 
