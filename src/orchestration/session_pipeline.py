@@ -146,6 +146,7 @@ class SessionPipeline:
         *,
         exit_engine: ExitEngine | None = None,
         request_timeout_sec: float = 30.0,
+        tick_timeout_sec: float = 120.0,
         pcr_history_path: Path | None = None,
         index_symbol: str = DEFAULT_INDEX_SYMBOL,
         nifty_symbol: str | None = None,
@@ -172,6 +173,7 @@ class SessionPipeline:
         if callable(bind_risk):
             bind_risk(self._risk_config)
         self._request_timeout_sec = request_timeout_sec
+        self._tick_timeout_sec = tick_timeout_sec
         self._pcr_history_path = pcr_history_path
         resolved_symbol = index_symbol if nifty_symbol is None else nifty_symbol
         self._index_contract: IndexContract = resolve_index_contract(resolved_symbol)
@@ -420,8 +422,12 @@ class SessionPipeline:
             except MemoryGuardError as exc:
                 raise SessionPipelineError(str(exc), code="MEMORY_GUARD") from exc
 
-        try:
-            ctx = ctx.update(trace_id=uuid4().hex)
+        ctx = ctx.update(trace_id=uuid4().hex)
+
+        async def _tick_body() -> SessionTickResult:
+            # nonlocal so the `finally` trace + timeout path see the latest state
+            # even if the body is cancelled mid-flight by the tick deadline.
+            nonlocal ctx, exit_decision, live_underlying_ltp
             ctx = sync_circuit_breaker(ctx)
             ctx = await self._refresh_features(ctx, shared_market=shared_market)
             if self._broker_sync:
@@ -497,6 +503,21 @@ class SessionPipeline:
                 live_underlying_ltp=live_underlying_ltp,
                 elapsed_ms=(time.perf_counter() - tick_start) * 1000,
             )
+
+        try:
+            return await asyncio.wait_for(
+                _tick_body(),
+                timeout=self._tick_timeout_sec,
+            )
+        except asyncio.TimeoutError as exc:
+            # A hung-but-alive call cannot orphan the tick lock: the deadline
+            # cancels the body, the `finally` releases the lock, and we fail
+            # closed by surfacing a typed error to the daemon loop.
+            raise SessionPipelineError(
+                f"Pipeline tick exceeded {self._tick_timeout_sec:.0f}s deadline; "
+                "aborted and released tick lock.",
+                code="TICK_TIMEOUT",
+            ) from exc
         finally:
             elapsed_ms = (time.perf_counter() - tick_start) * 1000
             await self._persist_tick_trace(

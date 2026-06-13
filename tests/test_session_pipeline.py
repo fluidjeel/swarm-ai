@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -637,6 +638,38 @@ class BootstrapBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(approve_rows)
         for row in approve_rows:
             self.assertEqual(row["trace_id"], result.ctx.trace_id)
+
+    async def test_run_tick_times_out_and_releases_lock(self) -> None:
+        class _SpyLock(NullTickLock):
+            def __init__(self) -> None:
+                self.acquires = 0
+                self.releases = 0
+
+            def acquire(self, *, blocking: bool = False) -> None:
+                self.acquires += 1
+
+            def release(self) -> None:
+                self.releases += 1
+
+        spy = _SpyLock()
+        pipeline = SessionPipeline(
+            _EntryChainProvider(),
+            tick_lock=spy,
+            tick_timeout_sec=0.05,
+        )
+        ctx = AgentContext(session_id="pipeline-timeout-01", dte=3)
+
+        async def _hang(_ctx, **_kwargs):
+            await asyncio.sleep(5.0)
+            return _ctx
+
+        with patch.object(pipeline, "_refresh_features", side_effect=_hang):
+            with self.assertRaises(SessionPipelineError) as cm:
+                await pipeline.run_tick(ctx)
+
+        self.assertEqual(cm.exception.code, "TICK_TIMEOUT")
+        # The deadline must release the lock so the next tick is not starved.
+        self.assertEqual(spy.releases, 1)
 
     async def test_run_tick_trace_id_changes_each_tick(self) -> None:
         pipeline = SessionPipeline(_EntryChainProvider(), tick_lock=NullTickLock())
