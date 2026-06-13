@@ -10,6 +10,28 @@ LEG_DELTA_ABS_MIN = 0.03
 LEG_DELTA_ABS_MAX = 0.97
 
 
+def effective_stale_quote_threshold(
+    config: RiskConfig,
+    *,
+    atr_5m: float | None = None,
+) -> float:
+    """Volatility-aware stale-quote threshold.
+
+    Returns ``min(stale_quote_points, stale_quote_atr_mult * atr_5m)``.
+
+    The fixed ``stale_quote_points`` (10 NIFTY pts) is a HARD CEILING per Prime
+    Directive #5: if the index moved more than that since feature capture, the
+    option-chain snapshot is genuinely stale regardless of volatility. The ATR
+    term only *tightens* the gate in calm markets, where 10 pts is too loose.
+    When ``atr_5m`` is unavailable the fixed ceiling is used (legacy behaviour).
+    """
+    ceiling = config.stale_quote_points
+    if atr_5m is None or atr_5m <= 0.0:
+        return ceiling
+    adaptive = config.stale_quote_atr_mult * atr_5m
+    return min(ceiling, adaptive)
+
+
 def validate_pre_trade(
     ctx: AgentContext,
     *,
@@ -19,6 +41,7 @@ def validate_pre_trade(
     leg_deltas: list[float],
     leg_gammas: list[float],
     config: RiskConfig,
+    atr_5m: float | None = None,
 ) -> AgentContext:
     """Pure math. Reject if baseline, snapshot, stale quote, spread, or greeks fail."""
     if not ctx.baseline_initialized:
@@ -35,7 +58,8 @@ def validate_pre_trade(
                 reason="snapshot_price_missing",
             )
         )
-    if abs(live_underlying_ltp - ctx.feature_snapshot_price) > config.stale_quote_points:
+    stale_threshold = effective_stale_quote_threshold(config, atr_5m=atr_5m)
+    if abs(live_underlying_ltp - ctx.feature_snapshot_price) > stale_threshold:
         return ctx.update(
             critic_decision=CriticDecision(
                 status=CriticStatus.REJECT,

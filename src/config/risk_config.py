@@ -24,6 +24,11 @@ class RiskConfig(BaseModel):
     credit_stop_multiplier: float = Field(default=1.5, ge=1.5, le=2.0)
     range_divergence_band: float = Field(default=0.10, ge=0.0)
     stale_quote_points: float = Field(default=STALE_QUOTE_POINTS, gt=0.0)
+    # Adaptive stale-quote gate: effective threshold = min(stale_quote_points,
+    # stale_quote_atr_mult * 5m_ATR). The fixed stale_quote_points stays a HARD
+    # CEILING (Prime Directive #5) — the ATR term can only TIGHTEN the gate in
+    # calm markets, never loosen it past 10 NIFTY points.
+    stale_quote_atr_mult: float = Field(default=0.5, gt=0.0)
     max_spread_pct: float = Field(default=0.05, gt=0.0)
     max_gamma: float = Field(default=0.05, gt=0.0)
     max_lots_per_trade: int = Field(default=4, ge=1)

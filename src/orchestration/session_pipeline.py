@@ -15,6 +15,7 @@ from typing import Any, Protocol, Sequence
 logger = logging.getLogger(__name__)
 
 from src.agents.pre_trade_critic import validate_pre_trade
+from src.features.math_utils import compute_atr
 from src.agents.regime_classifier import classify_regime
 from src.agents.strategy_selector import select_strategy
 from src.agents.symbol_resolver import (
@@ -451,6 +452,7 @@ class SessionPipeline:
                 ctx, live_underlying_ltp = await self._run_entry_chain(
                     ctx,
                     tick_timestamp=tick_timestamp,
+                    nifty_bars=nifty_bars,
                 )
                 self._maybe_log_paper_approve(ctx)
 
@@ -509,6 +511,7 @@ class SessionPipeline:
         ctx: AgentContext,
         *,
         tick_timestamp: str,
+        nifty_bars: Sequence[OhlcvBar] | None = None,
     ) -> tuple[AgentContext, float | None]:
         ctx = classify_regime(ctx, config=self._risk_config)
         ctx = select_strategy(ctx)
@@ -555,6 +558,13 @@ class SessionPipeline:
                     else 0.0
                 )
 
+                atr_5m: float | None = None
+                if nifty_bars and len(nifty_bars) >= 2:
+                    try:
+                        atr_5m = compute_atr(nifty_bars)
+                    except ValueError:
+                        atr_5m = None
+
                 ctx = validate_pre_trade(
                     ctx,
                     live_underlying_ltp=live_underlying_ltp,
@@ -563,6 +573,7 @@ class SessionPipeline:
                     leg_deltas=[leg_g.delta for leg_g in selected_legs],
                     leg_gammas=[leg_g.gamma for leg_g in selected_legs],
                     config=self._risk_config,
+                    atr_5m=atr_5m,
                 )
             except (ExpirySelectionError, StrikeSelectionError) as exc:
                 ctx = ctx.update(

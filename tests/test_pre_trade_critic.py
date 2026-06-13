@@ -7,6 +7,7 @@ import unittest
 from src.agents.pre_trade_critic import (
     LEG_DELTA_ABS_MAX,
     LEG_DELTA_ABS_MIN,
+    effective_stale_quote_threshold,
     validate_pre_trade,
 )
 from src.config.risk_config import RiskConfig
@@ -168,6 +169,60 @@ class PreTradeCriticTests(unittest.TestCase):
             config=CONFIG,
         )
         self.assertEqual(result.critic_decision.reason, "greeks_out_of_bounds")
+
+
+class AdaptiveStaleQuoteThresholdTests(unittest.TestCase):
+    def test_no_atr_falls_back_to_fixed_ceiling(self) -> None:
+        self.assertEqual(
+            effective_stale_quote_threshold(CONFIG, atr_5m=None),
+            CONFIG.stale_quote_points,
+        )
+
+    def test_low_vol_atr_tightens_below_ceiling(self) -> None:
+        # 5m ATR of 8 pts -> 0.5 * 8 = 4 < 10 ceiling.
+        self.assertAlmostEqual(
+            effective_stale_quote_threshold(CONFIG, atr_5m=8.0), 4.0
+        )
+
+    def test_high_vol_atr_capped_at_hard_ceiling(self) -> None:
+        # 5m ATR of 40 pts -> 0.5 * 40 = 20, but ceiling caps at 10.
+        self.assertEqual(
+            effective_stale_quote_threshold(CONFIG, atr_5m=40.0),
+            CONFIG.stale_quote_points,
+        )
+
+    def test_zero_or_negative_atr_uses_ceiling(self) -> None:
+        self.assertEqual(
+            effective_stale_quote_threshold(CONFIG, atr_5m=0.0),
+            CONFIG.stale_quote_points,
+        )
+
+    def test_critic_rejects_when_move_exceeds_tightened_threshold(self) -> None:
+        # In calm market (ATR=8 -> threshold 4), a 6pt move is now stale.
+        result = validate_pre_trade(
+            _ready_ctx(snapshot=24850.0),
+            live_underlying_ltp=24856.0,
+            bid_ask_spread_pct=0.02,
+            greeks_confidence="high",
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
+            config=CONFIG,
+            atr_5m=8.0,
+        )
+        self.assertEqual(result.critic_decision.reason, "stale_quote_abort")
+
+    def test_critic_approves_same_move_without_atr(self) -> None:
+        # Same 6pt move passes under the fixed 10pt ceiling when no ATR given.
+        result = validate_pre_trade(
+            _ready_ctx(snapshot=24850.0),
+            live_underlying_ltp=24856.0,
+            bid_ask_spread_pct=0.02,
+            greeks_confidence="high",
+            leg_deltas=[0.25],
+            leg_gammas=[0.01],
+            config=CONFIG,
+        )
+        self.assertEqual(result.critic_decision.status, CriticStatus.APPROVE)
 
 
 if __name__ == "__main__":

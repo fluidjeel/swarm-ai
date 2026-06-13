@@ -19,6 +19,7 @@ class AbsoluteLimits(BaseModel):
     pcr_bear_threshold: tuple[float, float, str] = (-0.50, 0.50, "PCR momentum bear band")
     range_divergence_band: tuple[float, float, str] = (0.01, 0.50, "Range divergence band")
     stale_quote_points: tuple[float, float, str] = (1.0, 50.0, "Stale-quote NIFTY points band")
+    stale_quote_atr_mult: tuple[float, float, str] = (0.1, 2.0, "Adaptive stale-quote ATR multiplier band")
     max_spread_pct: tuple[float, float, str] = (0.005, 0.20, "Max spread % band")
     max_gamma: tuple[float, float, str] = (0.001, 0.20, "Max gamma band")
     max_lots_per_trade: tuple[int, int, str] = (1, 10, "Max lots per trade")
